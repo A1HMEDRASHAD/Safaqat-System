@@ -1461,3 +1461,2949 @@ function renderContractsBooksGrid() {
 }
 
 document.getElementById("books-search-input").addEventListener("input", renderContractsBooksGrid);
+// ==========================================================================
+// Safaqat System ERP - Institutional Master Engine v2.0 (app.js - Part 2/2)
+// Archive & Print Hub | Paper/Digital Sales | Smart Pickers | Author Controls
+// ==========================================================================
+
+// ==========================================================================
+// 12. تعبئة القوائم الذكية التفاعلية (Smart Auto-Complete Data Population)
+// ==========================================================================
+function populateAllSelects() {
+  // 1. قائمة المؤلفين
+  const authorOpts =
+    `<option value="">-- ابحث واختر المؤلف --</option>` +
+    state.authors
+      .map((a) => `<option value="${a.id}">${cleanText(a.name)} (${cleanText(a.email)})</option>`)
+      .join("");
+
+  ["book-author-select", "payout-author-select"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) {
+      const cur = el.value;
+      el.innerHTML = authorOpts;
+      if (cur) el.value = cur;
+    }
+  });
+
+  // 2. قوائم المستودعات الفرعية
+  const whOptions = state.warehouses.length
+    ? state.warehouses.map((w) => `<option value="${w.id}">${cleanText(w.name)}</option>`).join("")
+    : `<option value="default">المستودع الرئيسي للدار</option>`;
+
+  ["book-warehouse-select", "ed-from-wh-select", "ed-to-wh-select", "supply-wh-select", "sell-confirm-wh"].forEach(
+    (id) => {
+      const el = document.getElementById(id);
+      if (el) {
+        const cur = el.value;
+        el.innerHTML = whOptions;
+        if (cur) el.value = cur;
+      }
+    }
+  );
+
+  // 3. قوائم الكتب (في الطبعات، توريد المكتبات، التصفية، والحاسبة الذكية)
+  const bookOptions =
+    `<option value="">-- ابحث واختر الكتاب --</option>` +
+    state.books
+      .map(
+        (b) =>
+          `<option value="${b.id}">${cleanText(b.title)} — ${cleanText(b.authorName)} (ورقي: ${formatEGP(b.price)} | بالمستودع: ${Number(b.stock || 0)})</option>`
+      )
+      .join("");
+
+  ["ed-book-select", "supply-book-select", "settle-book-select", "calc-book-select"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) {
+      const cur = el.value;
+      el.innerHTML = bookOptions;
+      if (cur) el.value = cur;
+    }
+  });
+
+  // 4. قائمة المعارض في نموذج المصروفات
+  const expExhSel = document.getElementById("expense-exhibition-select");
+  if (expExhSel) {
+    const cur = expExhSel.value;
+    expExhSel.innerHTML =
+      `<option value="">-- ابحث واختر المعرض --</option>` +
+      state.exhibitions.map((x) => `<option value="${x.id}">${cleanText(x.name)} (${x.startDate || ""})</option>`).join("");
+    if (cur) expExhSel.value = cur;
+  }
+
+  // 5. قائمة المستهدفين في التنبيهات (موظفين + مؤلفين)
+  const notifTargetSel = document.getElementById("notif-target-select");
+  if (notifTargetSel) {
+    const cur = notifTargetSel.value;
+    const staffOpts = state.staff
+      .filter((s) => !isSuperAdminEmail(s.email))
+      .map((s) => `<option value="${s.email}">موظف: ${cleanText(s.name)} (${cleanText(s.email)})</option>`)
+      .join("");
+    const authOpts = state.authors
+      .map((a) => `<option value="${a.email}">مؤلف: ${cleanText(a.name)} (${cleanText(a.email)})</option>`)
+      .join("");
+    notifTargetSel.innerHTML =
+      `<option value="all">جميع الموظفين وفريق العمل</option>` + staffOpts + authOpts;
+    if (cur) notifTargetSel.value = cur;
+  }
+
+  // 6. مربعات الاختيار المتعدد للكتب في المعارض والحملات الإعلانية
+  const booksCheckHTML = state.books
+    .map(
+      (b) => `
+      <label class="check-tile">
+        <input type="checkbox" value="${b.id}" class="js-multi-book-chk" />
+        <span>${cleanText(b.title)}</span>
+      </label>`
+    )
+    .join("");
+
+  const exhCheckBox = document.getElementById("exh-books-checklist");
+  if (exhCheckBox && !exhCheckBox.innerHTML.trim()) exhCheckBox.innerHTML = booksCheckHTML;
+
+  const expCheckBox = document.getElementById("expense-books-checklist");
+  if (expCheckBox && !expCheckBox.innerHTML.trim()) expCheckBox.innerHTML = booksCheckHTML;
+
+  refreshSmartPickersUI();
+  updateSmartCalculatorBreakdown();
+}
+
+// ==========================================================================
+// 13. الصفحة التفصيلية للكتاب + الأرشيف الرقمي المركزي ووحدة الطباعة التعاونية
+// ==========================================================================
+function getAccessModeBadge(mode) {
+  if (mode === "read_only") return `<span class="badge">بوابة المؤلف: قراءة فقط (بدون تحميل)</span>`;
+  if (mode === "stats_only") return `<span class="badge">بوابة المؤلف: إحصائيات فقط</span>`;
+  if (mode === "hidden") return `<span class="badge neg">مخفي عن بوابة المؤلف</span>`;
+  return `<span class="badge pos">بوابة المؤلف: إتاحة كاملة وتحميل</span>`;
+}
+
+function renderSingleBookDetail(bookId) {
+  const b = state.books.find((x) => x.id === bookId);
+  if (!b) return;
+
+  const contract = getContractInfo(b.contractDate, b.contractMonths, b.isTerminated);
+  const bookSales = state.sales.filter((s) => s.bookId === bookId);
+  const paperSold = Number(b.copiesSold || 0);
+  const digSold = Number(b.digitalCopiesSold || 0);
+
+  const totalRev = bookSales.length
+    ? bookSales.reduce((s, x) => s + Number(x.totalAmount || 0), 0)
+    : paperSold * Number(b.price || 0) + digSold * Number(b.digitalPrice || b.price || 0);
+
+  const authorCut = bookSales.length
+    ? bookSales.reduce((s, x) => s + Number(x.authorCut || 0), 0)
+    : totalRev * (Number(b.royaltyRate || 0) / 100);
+
+  let bookExpenses = 0;
+  state.expenses.forEach((exp) => {
+    if (Array.isArray(exp.bookIds) && exp.bookIds.includes(bookId)) {
+      bookExpenses += Number(exp.amount || 0) / exp.bookIds.length;
+    }
+  });
+
+  const bookEditions = state.editions.filter((e) => e.bookId === bookId && e.opType === "new_edition");
+  const totalPrinted =
+    bookEditions.reduce((s, e) => s + Number(e.qty || 0), 0) + Number(b.initialPrinted || 0) || Number(b.stock || 0);
+
+  document.getElementById("btn-book-det-pdf").style.display = b.drivePdfUrl ? "inline-flex" : "none";
+  document.getElementById("btn-book-det-print-file").style.display = b.printDrivePdfUrl ? "inline-flex" : "none";
+  document.getElementById("btn-book-det-delete").style.display = state.permissions.deleteBook ? "inline-flex" : "none";
+  document.getElementById("btn-book-det-terminate").style.display = state.permissions.deleteBook ? "inline-flex" : "none";
+
+  document.getElementById("book-detail-header-card").innerHTML = `
+    <div style="display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap;">
+      ${b.coverUrl ? `<img src="${b.coverUrl}" style="width: 92px; height: 130px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border);" />` : ""}
+      <div style="flex: 1; min-width: 220px;">
+        <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px;">
+          <span class="badge ${contract.badgeClass}">${contract.label}</span>
+          ${getAccessModeBadge(b.authorAccessMode)}
+          ${b.category ? `<span class="badge">${cleanText(b.category)}</span>` : ""}
+          ${b.edition ? `<span class="badge">${cleanText(b.edition)}</span>` : ""}
+          ${b.isbn ? `<span class="badge" dir="ltr">ISBN: ${cleanText(b.isbn)}</span>` : ""}
+        </div>
+        <h2 style="font-size: 20px; font-weight: 900; margin-bottom: 4px;">${cleanText(b.title)}</h2>
+        <p style="font-size: 13.5px; color: var(--text-secondary); cursor: pointer;" data-action="open-author" data-id="${b.authorId}">
+          المؤلف: <strong style="text-decoration: underline;">${cleanText(b.authorName)}</strong> •
+          سعر الورقي: <strong>${formatEGP(b.price)}</strong> •
+          سعر الإلكتروني: <strong>${formatEGP(b.digitalPrice || b.price)}</strong>
+        </p>
+        <p style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">
+          تاريخ العقد: ${b.contractDate || "-"} • المدة: ${b.contractMonths || 24} شهر • الانتهاء: ${contract.endDateStr}
+        </p>
+        ${b.notes ? `<div style="margin-top: 8px; padding: 8px 12px; background: var(--bg-subtle); border-radius: 8px; font-size: 12.5px;"><strong>بنود وملاحظات العقد:</strong> ${cleanText(b.notes)}</div>` : ""}
+      </div>
+    </div>
+  `;
+
+  document.getElementById("bdet-rev").textContent = formatEGP(totalRev);
+  document.getElementById("bdet-sold-copies").textContent = `${paperSold} ورقية • ${digSold} إلكترونية`;
+  document.getElementById("bdet-author-cut").textContent = formatEGP(authorCut);
+  document.getElementById("bdet-royalty-rate").textContent = `نسبة المؤلف: ${Number(b.royaltyRate || 0)}%`;
+  document.getElementById("bdet-expenses").textContent = formatEGP(bookExpenses);
+  document.getElementById("bdet-stock").textContent = `${Number(b.stock || 0)} نسخة`;
+  document.getElementById("bdet-printed-total").textContent = `إجمالي المطبوع: ${totalPrinted} نسخة`;
+
+  // عرض الأغلفة الثلاثة وملفات الطباعة والعقد في الأرشيف الخاص بالكتاب
+  const coverSlots = [
+    { label: "الغلاف الأمامي (الواجهة)", url: b.coverUrl },
+    { label: "الغلاف الخلفي", url: b.backCoverUrl },
+    { label: "الغلاف المزدوج الكامل (Spread)", url: b.spreadCoverUrl }
+  ];
+
+  document.getElementById("bdet-archive-assets").innerHTML = `
+    <div class="covers-showcase-grid">
+      ${coverSlots
+        .map(
+          (slot) => `
+        <div class="cover-slot-card">
+          <strong style="font-size: 12px;">${slot.label}</strong>${
+            slot.url
+              ? `<img src="${slot.url}" alt="${slot.label}" loading="lazy" />
+                 <div style="display: flex; gap: 6px; justify-content: center;">
+                   <a href="${slot.url}" target="_blank" class="btn btn-outline" style="padding: 5px 10px; font-size: 11.5px;"><i class="ri-external-link-line"></i><span>فتح / تحميل</span></a>
+                 </div>`
+              : `<div style="height: 170px; display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 12px; border: 1px dashed var(--border-strong); border-radius: 8px;">غير مرفوع</div>`
+          }
+        </div>`
+        )
+        .join("")}
+    </div>
+    <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);">
+      ${
+        b.printDrivePdfUrl
+          ? `<button type="button" class="btn btn-primary" data-action="open-custom-pdf" data-id="${b.id}" data-kind="print">
+               <i class="ri-printer-cloud-line"></i><span>معاينة وطباعة ملف الكتاب (PDF)</span>
+             </button>`
+          : `<span class="badge">لم يُربط ملف طباعة PDF بعد</span>`
+      }
+      ${
+        b.drivePdfUrl
+          ? `<button type="button" class="btn btn-outline" data-action="open-custom-pdf" data-id="${b.id}" data-kind="contract">
+               <i class="ri-file-pdf-2-line"></i><span>معاينة وتحميل وثيقة العقد (PDF)</span>
+             </button>`
+          : `<span class="badge">لم يُربط ملف العقد PDF بعد</span>`
+      }
+    </div>
+  `;
+
+  // توزيع المستودعات وسجل الطبعات
+  const whStocks = b.warehouseStocks || {};
+  const whRows = Object.entries(whStocks)
+    .map(([whId, qty]) => {
+      const wh = state.warehouses.find((w) => w.id === whId);
+      return `<div class="list-row" style="padding: 8px 12px;"><span><i class="ri-store-2-line"></i> ${cleanText(wh ? wh.name : "المستودع الرئيسي")}</span><strong>${qty} نسخة</strong></div>`;
+    })
+    .join("");
+
+  const edRows = state.editions
+    .filter((e) => e.bookId === bookId)
+    .map(
+      (e) =>
+        `<div class="list-row" style="padding: 8px 12px; font-size: 12.5px;">
+           <span>${e.opType === "transfer" ? "نقل مخزني" : "طبعة جديدة"}: <strong>${cleanText(e.title || "")}</strong> (${e.qty} نسخة)</span>
+           <span class="badge">${e.dateString}</span>
+         </div>`
+    )
+    .join("");
+
+  document.getElementById("bdet-warehouses-editions").innerHTML =
+    (whRows || `<p style="font-size: 12.5px; color: var(--text-muted); margin-bottom: 8px;">إجمالي الرصيد الورقي العام: ${Number(b.stock || 0)} نسخة</p>`) +
+    `<h5 style="font-size: 13px; margin: 12px 0 6px;">سجل الطبعات والتحويلات:</h5>` +
+    (edRows || `<p style="font-size: 12px; color: var(--text-muted);">لا توجد طبعات إضافية مسجلة بعد.</p>`);
+
+  const linkedExhs = state.exhibitions.filter((x) => Array.isArray(x.bookIds) && x.bookIds.includes(bookId));
+  const libSupplied = state.libraryTransactions.filter((t) => t.bookId === bookId && t.txType === "supply");
+
+  document.getElementById("bdet-exhibitions-libraries").innerHTML = `
+    <h5 style="font-size: 13px; margin-bottom: 6px;">المعارض المشارك بها (${linkedExhs.length}):</h5>
+    ${
+      linkedExhs.length
+        ? linkedExhs
+            .map(
+              (x) =>
+                `<div class="list-row" style="padding: 8px 12px; cursor: pointer;" data-action="open-exhibition" data-id="${x.id}">
+                   <span><i class="ri-compass-discover-line"></i> <strong>${cleanText(x.name)}</strong></span>
+                   <span class="badge">${x.startDate}</span>
+                 </div>`
+            )
+            .join("")
+        : `<p style="font-size: 12px; color: var(--text-muted); margin-bottom: 10px;">غير مرتبط بمعارض حالياً.</p>`
+    }
+    <h5 style="font-size: 13px; margin: 12px 0 6px;">شحنات التوريد للمكتبات (${libSupplied.length}):</h5>
+    ${
+      libSupplied.length
+        ? libSupplied
+            .map(
+              (t) =>
+                `<div class="list-row" style="padding: 8px 12px; font-size: 12.5px;">
+                   <span>مكتبة: <strong>${cleanText(t.libraryName)}</strong></span>
+                   <span class="badge">${t.qty} نسخة</span>
+                 </div>`
+            )
+            .join("")
+        : `<p style="font-size: 12px; color: var(--text-muted);">لم يتم توريده لمكتبات بعد.</p>`
+    }
+  `;
+}
+
+document.getElementById("btn-back-from-book").addEventListener("click", () => navigateToView("view-contracts"));
+document.getElementById("btn-book-det-sell").addEventListener("click", () => {
+  if (state.selectedBookDetailId) openSellModal(state.selectedBookDetailId, "");
+});
+document.getElementById("btn-book-det-edition").addEventListener("click", () => {
+  openEditionFormPage(state.selectedBookDetailId);
+});
+document.getElementById("btn-book-det-pdf").addEventListener("click", () => {
+  const b = state.books.find((x) => x.id === state.selectedBookDetailId);
+  if (b && b.drivePdfUrl) openCustomPdfViewer(`وثيقة عقد كتاب: ${b.title}`, b.drivePdfUrl, true);
+});
+document.getElementById("btn-book-det-print-file").addEventListener("click", () => {
+  const b = state.books.find((x) => x.id === state.selectedBookDetailId);
+  if (b && b.printDrivePdfUrl) openCustomPdfViewer(`ملف الطباعة النهائي: ${b.title}`, b.printDrivePdfUrl, true);
+});
+document.getElementById("btn-book-det-edit").addEventListener("click", () => {
+  if (state.selectedBookDetailId) openBookFormPage(state.selectedBookDetailId, null);
+});
+document.getElementById("btn-book-det-terminate").addEventListener("click", () => {
+  const b = state.books.find((x) => x.id === state.selectedBookDetailId);
+  if (!b) return;
+  askConfirm(
+    b.isTerminated ? "إعادة تفعيل العقد" : "فسخ / إلغاء عقد الكتاب",
+    `هل أنت متأكد من ${b.isTerminated ? "إعادة تفعيل" : "فسخ وإيقاف"} عقد كتاب "${b.title}"؟`,
+    async () => {
+      await updateDoc(doc(db, "books", b.id), { isTerminated: !b.isTerminated });
+      await logAudit("تحديث حالة عقد", `${!b.isTerminated ? "فسخ" : "تفعيل"} عقد كتاب: ${b.title}`);
+      showToast("تم تحديث حالة العقد");
+    }
+  );
+});
+document.getElementById("btn-book-det-delete").addEventListener("click", () => {
+  const b = state.books.find((x) => x.id === state.selectedBookDetailId);
+  if (!b) return;
+  askConfirm("حذف الكتاب نهائياً", `هل أنت متأكد من حذف كتاب "${b.title}"؟`, async () => {
+    await deleteDoc(doc(db, "books", b.id));
+    await logAudit("حذف كتاب", `حذف كتاب: ${b.title}`);
+    showToast("تم حذف الكتاب");
+    navigateToView("view-contracts");
+  });
+});
+
+// --- قسم الأرشيف الرقمي المركزي ووحدة الطباعة التعاونية ---
+document.querySelectorAll("[data-arch-filter]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("[data-arch-filter]").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    state.activeArchiveFilter = btn.getAttribute("data-arch-filter");
+    renderArchiveHub();
+  });
+});
+
+document.getElementById("archive-search-input")?.addEventListener("input", renderArchiveHub);
+
+function renderArchiveHub() {
+  const box = document.getElementById("archive-items-grid");
+  if (!box) return;
+  const q = normalizeArabic(document.getElementById("archive-search-input")?.value || "");
+
+  let list = [...state.books];
+  if (state.activeArchiveFilter === "print") list = list.filter((b) => !!b.printDrivePdfUrl);
+  else if (state.activeArchiveFilter === "contracts") list = list.filter((b) => !!b.drivePdfUrl);
+  else if (state.activeArchiveFilter === "covers")
+    list = list.filter((b) => b.coverUrl || b.backCoverUrl || b.spreadCoverUrl);
+
+  if (q) {
+    list = list.filter(
+      (b) => normalizeArabic(b.title).includes(q) || normalizeArabic(b.authorName).includes(q)
+    );
+  }
+
+  if (!list.length) {
+    box.innerHTML = `<div class="surface-card" style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 30px;">لا توجد ملفات أرشيفية مطابقة للفلتر الحالي.</div>`;
+    return;
+  }
+
+  box.innerHTML = list
+    .map((b) => {
+      return `
+        <div class="surface-card" style="display: flex; flex-direction: column; justify-content: space-between; gap: 12px;">
+          <div>
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px;">
+              ${getAccessModeBadge(b.authorAccessMode)}
+              ${b.edition ? `<span class="badge">${cleanText(b.edition)}</span>` : ""}
+            </div>
+            <h4 style="font-size: 16px; font-weight: 800; cursor: pointer;" data-action="open-book" data-id="${b.id}">${cleanText(b.title)}</h4>
+            <p style="font-size: 12px; color: var(--text-secondary);">المؤلف: ${cleanText(b.authorName)}</p>
+          </div>
+
+          <!-- مصغرات الأغلفة الثلاثة -->
+          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+            ${b.coverUrl ? `<a href="${b.coverUrl}" target="_blank" class="badge invert"><i class="ri-image-line"></i> الغلاف الأمامي</a>` : ""}
+            ${b.backCoverUrl ? `<a href="${b.backCoverUrl}" target="_blank" class="badge invert"><i class="ri-image-line"></i> الغلاف الخلفي</a>` : ""}
+            ${b.spreadCoverUrl ? `<a href="${b.spreadCoverUrl}" target="_blank" class="badge invert"><i class="ri-artboard-line"></i> الغلاف المزدوج</a>` : ""}
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 6px; margin-top: auto;">
+            ${
+              b.printDrivePdfUrl
+                ? `<button type="button" class="btn btn-primary" style="width: 100%;" data-action="open-custom-pdf" data-id="${b.id}" data-kind="print">
+                     <i class="ri-printer-line"></i><span>معاينة / طباعة ملف الكتاب PDF</span>
+                   </button>`
+                : `<div style="font-size: 11.5px; color: var(--text-muted); text-align: center; padding: 6px; background: var(--bg-subtle); border-radius: 8px;">لا يوجد رابط ملف طباعة PDF</div>`
+            }
+            <div style="display: flex; gap: 6px;">
+              ${
+                b.drivePdfUrl
+                  ? `<button type="button" class="btn btn-outline" style="flex: 1;" data-action="open-custom-pdf" data-id="${b.id}" data-kind="contract">
+                       <i class="ri-file-pdf-2-line"></i><span>وثيقة العقد</span>
+                     </button>`
+                  : ""
+              }
+              <button type="button" class="btn btn-outline" style="flex: 1;" data-action="edit-book" data-id="${b.id}">
+                <i class="ri-edit-box-line"></i><span>تحديث الروابط</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+// ==========================================================================
+// 14. إدارة المستودعات الفرعية والطبعات (Multi-Warehouse & Editions)
+// ==========================================================================
+document.getElementById("btn-goto-add-warehouse").addEventListener("click", () => {
+  document.getElementById("form-warehouse").reset();
+  navigateToView("view-form-warehouse");
+});
+
+document.getElementById("form-warehouse").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-warehouse");
+  await withSubmitLock(btn, async () => {
+    const name = document.getElementById("wh-name-field").value.trim();
+    const location = document.getElementById("wh-location-field").value.trim();
+    await addDoc(collection(db, "warehouses"), { name, location, createdAt: serverTimestamp() });
+    await logAudit("إضافة مستودع", `إنشاء مستودع فرعي: ${name}`);
+    clearDraftPrefix("wh_");
+    showToast("تم إنشاء المستودع الفرعي بنجاح");
+    navigateToView("view-warehouses");
+  });
+});
+
+document.getElementById("btn-goto-add-edition").addEventListener("click", () => openEditionFormPage(null));
+document.getElementById("qadd-edition").addEventListener("click", () => {
+  quickAddSheet.classList.remove("show");
+  openEditionFormPage(null);
+});
+
+document.getElementById("ed-operation-type").addEventListener("change", (e) => {
+  const isTransfer = e.target.value === "transfer";
+  document.getElementById("ed-from-wh-wrap").style.display = isTransfer ? "block" : "none";
+  document.getElementById("ed-to-wh-label").textContent = isTransfer
+    ? "إلى مستودع (الوجهة) *"
+    : "إيداع الطبعة في مستودع *";
+});
+
+function openEditionFormPage(preBookId = null) {
+  if (!state.books.length) {
+    showToast("أضف كتاباً أولاً قبل تسجيل طبعة أو نقل مخزون");
+    return;
+  }
+  document.getElementById("form-edition").reset();
+  document.getElementById("ed-from-wh-wrap").style.display = "none";
+  populateAllSelects();
+  if (preBookId) document.getElementById("ed-book-select").value = preBookId;
+  refreshSmartPickersUI();
+  navigateToView("view-form-edition");
+}
+
+document.getElementById("form-edition").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-edition");
+  await withSubmitLock(btn, async () => {
+    const opType = document.getElementById("ed-operation-type").value;
+    const bookId = document.getElementById("ed-book-select").value;
+    const qty = Math.max(1, Number(document.getElementById("ed-qty-field").value || 1));
+    const fromWhId = document.getElementById("ed-from-wh-select").value;
+    const toWhId = document.getElementById("ed-to-wh-select").value;
+    const title =
+      document.getElementById("ed-title-field").value.trim() ||
+      (opType === "transfer" ? "نقل مخزون" : "طبعة جديدة");
+
+    const b = state.books.find((x) => x.id === bookId);
+    if (!b) {
+      showToast("يرجى اختيار الكتاب أولاً");
+      return;
+    }
+
+    const whStocks = { ...(b.warehouseStocks || {}) };
+
+    if (opType === "transfer") {
+      if (fromWhId === toWhId) {
+        showToast("يرجى اختيار مستودعين مختلفين للنقل بينهما");
+        return;
+      }
+      whStocks[fromWhId] = Math.max(0, Number(whStocks[fromWhId] || b.stock || 0) - qty);
+      whStocks[toWhId] = Number(whStocks[toWhId] || 0) + qty;
+      await updateDoc(doc(db, "books", bookId), { warehouseStocks: whStocks });
+      await logAudit("نقل مخزون", `نقل (${qty}) نسخة من كتاب "${b.title}" بين المستودعات`);
+    } else {
+      const newTotalStock = Number(b.stock || 0) + qty;
+      whStocks[toWhId] = Number(whStocks[toWhId] || 0) + qty;
+      await updateDoc(doc(db, "books", bookId), {
+        stock: newTotalStock,
+        warehouseStocks: whStocks,
+        edition: title
+      });
+      await logAudit("إضافة طبعة جديدة", `إضافة طبعة (${title}) بعدد ${qty} نسخة لكتاب "${b.title}"`);
+    }
+
+    await addDoc(collection(db, "editions"), {
+      opType,
+      bookId,
+      bookTitle: b.title,
+      qty,
+      fromWhId: opType === "transfer" ? fromWhId : "",
+      toWhId,
+      title,
+      addedBy: state.userProfile.displayName,
+      dateString: getTodayStr(),
+      createdAt: serverTimestamp()
+    });
+
+    showToast("تم تحديث المستودع وسجل الطبعات بنجاح!");
+    navigateToView("view-warehouses");
+  });
+});
+
+function renderWarehousesView() {
+  const available = state.books.reduce((s, b) => s + Number(b.stock || 0), 0);
+  const printedFromEditions = state.editions
+    .filter((e) => e.opType === "new_edition")
+    .reduce((s, e) => s + Number(e.qty || 0), 0);
+  const initialPrinted = state.books.reduce((s, b) => s + Number(b.initialPrinted || 0), 0);
+  const totalPrinted = Math.max(available, printedFromEditions + initialPrinted);
+
+  const suppliedConsigned = state.libraryTransactions
+    .filter((t) => t.txType === "supply")
+    .reduce((s, t) => s + Number(t.qty || 0), 0);
+  const soldConsigned = state.libraryTransactions
+    .filter((t) => t.txType === "settle")
+    .reduce((s, t) => s + Number(t.qty || 0), 0);
+  const currentConsigned = Math.max(0, suppliedConsigned - soldConsigned);
+
+  document.getElementById("wh-stat-printed").textContent = `${totalPrinted} نسخة`;
+  document.getElementById("wh-stat-available").textContent = `${available} نسخة`;
+  document.getElementById("wh-stat-consigned").textContent = `${currentConsigned} نسخة`;
+  document.getElementById("wh-stat-count").textContent = `${Math.max(1, state.warehouses.length)} مستودع`;
+
+  const grid = document.getElementById("warehouses-cards-grid");
+  if (grid) {
+    grid.innerHTML = state.warehouses
+      .map((w) => {
+        let whTotal = 0;
+        const bookLines = [];
+        state.books.forEach((b) => {
+          const q = Number(
+            (b.warehouseStocks && b.warehouseStocks[w.id]) ||
+              (w.isDefault && !b.warehouseStocks ? b.stock : 0) ||
+              0
+          );
+          if (q > 0) {
+            whTotal += q;
+            bookLines.push(`<span class="badge">${cleanText(b.title)}: ${q}</span>`);
+          }
+        });
+        return `
+          <div class="surface-card">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+              <div>
+                <h4 style="font-size: 15.5px; font-weight: 800;"><i class="ri-store-3-line"></i> ${cleanText(w.name)}</h4>
+                <p style="font-size: 12px; color: var(--text-secondary);">${cleanText(w.location || "موقع معتمد")}</p>
+              </div>
+              <span class="badge invert">${whTotal} نسخة</span>
+            </div>
+            <div style="display: flex; gap: 5px; flex-wrap: wrap; margin-top: 8px;">
+              ${bookLines.length ? bookLines.join("") : `<span style="font-size: 12px; color: var(--text-muted);">لا توجد نسخ مسجلة بهذا المستودع</span>`}
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
+  const edList = document.getElementById("editions-history-list");
+  if (edList) {
+    edList.innerHTML = state.editions.length
+      ? state.editions
+          .slice(0, 40)
+          .map((e) => {
+            const toWh = state.warehouses.find((w) => w.id === e.toWhId);
+            return `
+              <div class="list-row">
+                <div>
+                  <h4 style="font-size: 14px; font-weight: 800;">
+                    ${e.opType === "transfer" ? "نقل مخزني" : "توريد طبعة"}: ${cleanText(e.bookTitle)}
+                    <span class="badge pos">+${e.qty} نسخة</span>
+                  </h4>
+                  <p style="font-size: 12px; color: var(--text-secondary);">
+                    ${cleanText(e.title)} • الوجهة: ${cleanText(toWh ? toWh.name : "المستودع الرئيسي")} • بواسطة: ${cleanText(e.addedBy || "")}
+                  </p>
+                </div>
+                <span class="badge">${e.dateString}</span>
+              </div>
+            `;
+          })
+          .join("")
+      : `<div class="surface-card" style="text-align: center; color: var(--text-muted); padding: 20px;">لا توجد حركات طبعات مسجلة بعد.</div>`;
+  }
+}
+
+// ==========================================================================
+// 15. ملفات الكُتّاب، الصور الاختيارية، مراجعة الاسم، وتفصيل المبيعات الإلكترونية
+// ==========================================================================
+function renderAuthorAvatarHTML(a, size = 44) {
+  if (a.avatarUrl) {
+    return `<img src="${a.avatarUrl}" alt="${cleanText(a.name)}" class="avatar-circle-img" style="width:${size}px;height:${size}px;" />`;
+  }
+  return `<div class="user-initials-circle" style="width:${size}px;height:${size}px;">${cleanText((a.name || "م")[0])}</div>`;
+}
+
+function renderAuthorsDirectory() {
+  const box = document.getElementById("authors-directory-grid");
+  if (!box) return;
+  const q = normalizeArabic(document.getElementById("authors-search-input").value || "");
+
+  const list = state.authors.filter(
+    (a) =>
+      normalizeArabic(a.name).includes(q) ||
+      normalizeArabic(a.email).includes(q) ||
+      normalizeArabic(a.phone).includes(q)
+  );
+
+  if (!list.length) {
+    box.innerHTML = `<div class="surface-card" style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 30px;">لا يوجد مؤلفون مسجلون حالياً. اضغط "إضافة مؤلف" للبدء.</div>`;
+    return;
+  }
+
+  box.innerHTML = list
+    .map((a) => {
+      const aBooks = state.books.filter((b) => b.authorId === a.id);
+      const aSales = state.sales.filter((s) => s.authorId === a.id);
+      const paperCopies = aBooks.reduce((s, b) => s + Number(b.copiesSold || 0), 0);
+      const digCopies = aBooks.reduce((s, b) => s + Number(b.digitalCopiesSold || 0), 0);
+
+      const earned = aSales.length
+        ? aSales.reduce((s, x) => s + Number(x.authorCut || 0), 0)
+        : aBooks.reduce(
+            (s, b) =>
+              s +
+              (Number(b.copiesSold || 0) * Number(b.price || 0) +
+                Number(b.digitalCopiesSold || 0) * Number(b.digitalPrice || b.price || 0)) *
+                (Number(b.royaltyRate || 0) / 100),
+            0
+          );
+
+      const paid = state.payouts
+        .filter((p) => p.authorId === a.id)
+        .reduce((s, p) => s + Number(p.amount || 0), 0);
+      const balance = Math.max(0, earned - paid);
+
+      return `
+        <div class="surface-card" style="display: flex; flex-direction: column; justify-content: space-between; gap: 12px;">
+          <div style="display: flex; align-items: center; gap: 12px; cursor: pointer;" data-action="open-author" data-id="${a.id}">
+            ${renderAuthorAvatarHTML(a, 46)}
+            <div style="flex: 1; min-width: 0;">
+              <div style="display: flex; gap: 5px; flex-wrap: wrap;">
+                <span class="badge invert">${aBooks.length} مؤلفات</span>
+                ${a.restricted ? `<span class="badge neg">مقيّد</span>` : ""}
+                ${a.pendingNameRequest ? `<span class="badge neg">طلب تعديل اسم</span>` : ""}
+              </div>
+              <h4 style="font-size: 15.5px; font-weight: 800; margin-top: 3px;">${cleanText(a.name)}</h4>
+              <p style="font-size: 11.5px; color: var(--text-secondary);" dir="ltr">${cleanText(a.email)}</p>
+            </div>
+          </div>
+
+          <div class="book-mini-stats">
+            <div><span>المبيعات</span><strong>${paperCopies} ورقي • ${digCopies} رقمي</strong></div>
+            <div><span>رصيد المحفظة</span><strong class="${balance > 0 ? "money-pos" : ""}">${formatEGP(balance)}</strong></div>
+          </div>
+
+          <div style="display: flex; gap: 6px;">
+            <button type="button" class="btn btn-primary" style="flex: 1; padding: 8px 10px;" data-action="open-author" data-id="${a.id}">
+              <i class="ri-wallet-3-line"></i><span>محفظة وكتب المؤلف</span>
+            </button>
+            ${
+              a.phone
+                ? `<a href="${buildWhatsAppUrl(a.phone, `السلام عليكم أ. ${a.name}، نتواصل معك من إدارة نظام صفقات كتابية...`)}" target="_blank" class="icon-btn" style="width: 36px; height: 36px; color: var(--pos);" title="مراسلة عبر واتساب">
+                     <i class="ri-whatsapp-line"></i>
+                   </a>`
+                : ""
+            }
+            <button type="button" class="icon-btn" style="width: 36px; height: 36px;" data-action="edit-author" data-id="${a.id}" title="تعديل البريد أو البيانات">
+              <i class="ri-edit-box-line"></i>
+            </button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+document.getElementById("authors-search-input").addEventListener("input", renderAuthorsDirectory);
+
+function renderAuthorDetailPage(authorId) {
+  const a = state.authors.find((x) => x.id === authorId);
+  if (!a) return;
+
+  const aBooks = state.books.filter((b) => b.authorId === authorId);
+  const aSales = state.sales.filter((s) => s.authorId === authorId);
+  const aPayouts = state.payouts.filter((p) => p.authorId === authorId);
+
+  const paperCopies = aBooks.reduce((s, b) => s + Number(b.copiesSold || 0), 0);
+  const digCopies = aBooks.reduce((s, b) => s + Number(b.digitalCopiesSold || 0), 0);
+
+  const digitalSalesList = aSales.filter((s) => s.copyFormat === "digital");
+  const digitalAuthorCut = digitalSalesList.length
+    ? digitalSalesList.reduce((s, x) => s + Number(x.authorCut || 0), 0)
+    : aBooks.reduce(
+        (s, b) =>
+          s + Number(b.digitalCopiesSold || 0) * Number(b.digitalPrice || b.price || 0) * (Number(b.royaltyRate || 0) / 100),
+        0
+      );
+
+  const earned = aSales.length
+    ? aSales.reduce((s, x) => s + Number(x.authorCut || 0), 0)
+    : aBooks.reduce(
+        (s, b) =>
+          s +
+          (Number(b.copiesSold || 0) * Number(b.price || 0) +
+            Number(b.digitalCopiesSold || 0) * Number(b.digitalPrice || b.price || 0)) *
+            (Number(b.royaltyRate || 0) / 100),
+        0
+      );
+
+  const paid = aPayouts.reduce((s, p) => s + Number(p.amount || 0), 0);
+  const balance = Math.max(0, earned - paid);
+
+  // شريط مراجعة طلب تغيير اسم المؤلف (إن وجد)
+  const reqBanner = document.getElementById("author-name-req-banner");
+  if (a.pendingNameRequest) {
+    reqBanner.style.display = "block";
+    reqBanner.innerHTML = `
+      <div class="list-row" style="border-color: var(--neg); background: var(--neg-bg);">
+        <div>
+          <strong style="color: var(--neg); font-size: 13.5px;"><i class="ri-user-Received-2-line"></i> طلب مراجعة لتغيير اسم المؤلف:</strong>
+          <p style="font-size: 13px;">يرغب المؤلف بتغيير اسمه من (<strong>${cleanText(a.name)}</strong>) إلى: <strong class="money-pos">${cleanText(a.pendingNameRequest)}</strong></p>
+        </div>
+        <div style="display: flex; gap: 6px;">
+          <button type="button" class="btn btn-pos" style="padding: 6px 12px; font-size: 12px;" data-action="approve-author-name" data-id="${a.id}">موافقة واعتماد الاسم</button>
+          <button type="button" class="btn btn-neg" style="padding: 6px 12px; font-size: 12px;" data-action="reject-author-name" data-id="${a.id}">رفض الطلب</button>
+        </div>
+      </div>
+    `;
+  } else {
+    reqBanner.style.display = "none";
+  }
+
+  document.getElementById("author-profile-banner").innerHTML = `
+    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+      <div style="display: flex; align-items: center; gap: 12px;">
+        ${renderAuthorAvatarHTML(a, 54)}
+        <div>
+          <div style="display: flex; gap: 6px; align-items: center;">
+            <h3 style="font-size: 18px; font-weight: 900;">أ. ${cleanText(a.name)}</h3>
+            <span class="badge ${a.restricted ? "neg" : "pos"}">${a.restricted ? "حساب مقيّد / مجمد" : "بوابة نشطة"}</span>
+          </div>
+          <p style="font-size: 12.5px; color: var(--text-secondary);" dir="ltr">${cleanText(a.email)} ${a.phone ? "• " + cleanText(a.phone) : ""}</p>
+          ${a.bio ? `<p style="font-size: 12px; color: var(--text-muted); margin-top: 3px;">${cleanText(a.bio)}</p>` : ""}
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+        ${
+          a.phone
+            ? `<a href="${buildWhatsAppUrl(a.phone, `السلام عليكم أ. ${a.name}، بخصوص حسابكم في دار صفقات كتابية...`)}" target="_blank" class="btn btn-pos" style="padding: 7px 12px; font-size: 12px;">
+                 <i class="ri-whatsapp-line"></i><span>واتساب</span>
+               </a>`
+            : ""
+        }
+        <button type="button" class="btn btn-outline" style="padding: 7px 12px; font-size: 12px;" data-action="edit-author" data-id="${a.id}">
+          <i class="ri-mail-settings-line"></i><span>تعديل البريد والبيانات</span>
+        </button>
+        <button type="button" class="btn btn-outline" style="padding: 7px 12px; font-size: 12px; color: var(--neg);" data-action="toggle-restrict-author" data-id="${a.id}">
+          <i class="ri-forbid-2-line"></i><span>${a.restricted ? "فك التقييد" : "تقييد المؤلف"}</span>
+        </button>
+        ${
+          state.permissions.deleteBook
+            ? `<button type="button" class="btn btn-neg" style="padding: 7px 12px; font-size: 12px;" data-action="delete-author-all" data-id="${a.id}">
+                 <i class="ri-delete-bin-2-line"></i><span>حذف المؤلف وكتبه</span>
+               </button>`
+            : ""
+        }
+      </div>
+    </div>
+  `;
+
+  document.getElementById("author-det-earned").textContent = formatEGP(earned);
+  document.getElementById("author-det-copies").textContent = `${paperCopies} ورقية • ${digCopies} إلكترونية`;
+  document.getElementById("author-det-digital-copies").textContent = `${digCopies} نسخة رقمية`;
+  document.getElementById("author-det-digital-rev").textContent = `عائد المؤلف الرقمي: ${formatEGP(digitalAuthorCut)}`;
+  document.getElementById("author-det-paid").textContent = formatEGP(paid);
+  document.getElementById("author-det-balance").textContent = formatEGP(balance);
+
+  const bankBox = document.getElementById("author-det-bank-box");
+  if (a.bankAccount || a.bankName) {
+    bankBox.innerHTML = `
+      <div class="grid-2" style="font-size: 13px;">
+        <div><strong>طريقة التحويل / البنك:</strong> ${cleanText(a.bankMethod || "")} - ${cleanText(a.bankName || "غير محدد")}</div>
+        <div><strong>اسم المستفيد الرباعي:</strong> ${cleanText(a.bankHolder || a.name)}</div>
+        <div><strong>رقم الحساب / IBAN / المحفظة:</strong> <span dir="ltr" style="font-family: monospace; font-weight: 800;">${cleanText(a.bankAccount || "-")}</span></div>
+        <div><strong>الدولة والمدينة:</strong> ${cleanText(a.bankCountry || "-")} ${a.bankNotes ? `(${cleanText(a.bankNotes)})` : ""}</div>
+      </div>
+    `;
+  } else {
+    bankBox.innerHTML = `<p style="font-size: 12.5px; color: var(--neg); font-weight: 700;">لم يقم المؤلف بإدخال بياناته البنكية بعد. يمكنك إرسال تنبيه له لتحديث بياناته أو إضافتها يدوياً من زر تعديل البيانات.</p>`;
+  }
+
+  document.getElementById("author-det-books-grid").innerHTML = aBooks.length
+    ? aBooks.map(buildBookCardHTML).join("")
+    : `<div class="surface-card" style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 24px;">لا توجد عقود كتب مسجلة لهذا المؤلف بعد.</div>`;
+
+  document.getElementById("author-det-payouts-list").innerHTML = aPayouts.length
+    ? aPayouts
+        .map(
+          (p) => `
+        <div class="list-row">
+          <div>
+            <h4 style="font-size: 14px; font-weight: 800;" class="money-pos">دفعة مسددة: ${formatEGP(p.amount)}</h4>
+            <p style="font-size: 12px; color: var(--text-secondary);">الطريقة: ${cleanText(p.method)} • التاريخ: ${p.dateString} ${p.notes ? "• " + cleanText(p.notes) : ""}</p>
+          </div>
+          <div style="display: flex; gap: 6px; align-items: center;">
+            ${
+              p.receiptUrl
+                ? `<a href="${p.receiptUrl}" target="_blank" class="btn btn-outline" style="padding: 5px 10px; font-size: 12px;"><i class="ri-image-line"></i><span>الإيصال</span></a>`
+                : `<span class="badge">بدون إيصال</span>`
+            }
+            ${
+              state.permissions.payouts
+                ? `<button type="button" class="icon-btn danger" style="width: 32px; height: 32px;" data-action="delete-payout" data-id="${p.id}"><i class="ri-delete-bin-line"></i></button>`
+                : ""
+            }
+          </div>
+        </div>`
+        )
+        .join("")
+    : `<div class="surface-card" style="text-align: center; color: var(--text-muted); padding: 20px;">لا توجد حوالات مسددة لهذا المؤلف حتى الآن.</div>`;
+}
+
+document.getElementById("btn-back-authors-list").addEventListener("click", () => {
+  state.selectedAuthorDetailId = null;
+  navigateToView("view-authors");
+});
+
+document.getElementById("btn-copy-author-bank").addEventListener("click", () => {
+  const a = state.authors.find((x) => x.id === state.selectedAuthorDetailId);
+  if (!a) return;
+  const txt = `المستفيد: ${a.bankHolder || a.name}\nالبنك/الطريقة: ${a.bankMethod || ""} - ${a.bankName || ""}\nرقم الحساب/IBAN: ${a.bankAccount || ""}\nالدولة: ${a.bankCountry || ""}`;
+  navigator.clipboard.writeText(txt);
+  showToast("تم نسخ البيانات البنكية للمؤلف");
+});
+
+document.getElementById("btn-alert-author-bank").addEventListener("click", async () => {
+  const a = state.authors.find((x) => x.id === state.selectedAuthorDetailId);
+  if (!a) return;
+  await addDoc(collection(db, "notifications"), {
+    target: a.email,
+    priority: "urgent",
+    title: "يرجى تحديث أو تصحيح بياناتك البنكية للتحويل",
+    body: `أهلاً بك أ. ${a.name}، يرجى مراجعة قسم (بياناتي البنكية) في بوابتك والتأكد من صحة الاسم الرباعي ورقم الحساب/IBAN لنتمكن من تحويل مستحقاتك المالية دون تأخير.`,
+    senderName: "الإدارة المالية",
+    dateString: getTodayStr(),
+    createdAt: serverTimestamp()
+  });
+  showToast("تم إرسال تنبيه عاجل لبوابة المؤلف لتصحيح بياناته البنكية!");
+});
+
+// ==========================================================================
+// 16. نظام المكتبات والموزعين - بضاعة الأمانة (Libraries Consignment)
+// ==========================================================================
+document.getElementById("btn-goto-add-library").addEventListener("click", () => {
+  document.getElementById("form-library").reset();
+  restoreDraftPrefix("lib_");
+  navigateToView("view-form-library");
+});
+document.getElementById("qadd-library").addEventListener("click", () => {
+  quickAddSheet.classList.remove("show");
+  document.getElementById("form-library").reset();
+  navigateToView("view-form-library");
+});
+
+document.getElementById("form-library").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-library");
+  await withSubmitLock(btn, async () => {
+    const payload = {
+      name: document.getElementById("lib-name-field").value.trim(),
+      city: document.getElementById("lib-city-field").value.trim(),
+      phone: document.getElementById("lib-phone-field").value.trim(),
+      discount: Number(document.getElementById("lib-discount-field").value || 0),
+      notes: document.getElementById("lib-notes-field").value.trim(),
+      createdAt: serverTimestamp()
+    };
+    const ref = await addDoc(collection(db, "libraries"), payload);
+    await logAudit("إضافة مكتبة", `إنشاء ملف مكتبة/موزع: ${payload.name}`);
+    clearDraftPrefix("lib_");
+    showToast("تم إنشاء ملف المكتبة بنجاح!");
+    state.selectedLibraryDetailId = ref.id;
+    renderLibraryDetailPage(ref.id);
+    navigateToView("view-library-detail");
+  });
+});
+
+function renderLibrariesGrid() {
+  const box = document.getElementById("libraries-cards-grid");
+  if (!box) return;
+
+  if (!state.libraries.length) {
+    box.innerHTML = `<div class="surface-card" style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 30px;">لا توجد مكتبات أو جهات توزيع مضافة بعد. اضغط "إنشاء ملف مكتبة / موزع".</div>`;
+    return;
+  }
+
+  box.innerHTML = state.libraries
+    .map((lib) => {
+      const txs = state.libraryTransactions.filter((t) => t.libraryId === lib.id);
+      const supplied = txs.filter((t) => t.txType === "supply").reduce((s, t) => s + Number(t.qty || 0), 0);
+      const sold = txs.filter((t) => t.txType === "settle").reduce((s, t) => s + Number(t.qty || 0), 0);
+      const rem = Math.max(0, supplied - sold);
+      const collected = txs.filter((t) => t.txType === "settle").reduce((s, t) => s + Number(t.amount || 0), 0);
+
+      return `
+        <div class="surface-card" style="display: flex; flex-direction: column; justify-content: space-between; gap: 12px;">
+          <div style="cursor: pointer;" data-action="open-library" data-id="${lib.id}">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <span class="badge invert">خصم التوزيع: ${lib.discount || 0}%</span>
+              <span class="badge ${rem > 0 ? "neg" : "pos"}">عهدة أمانة: ${rem} نسخة</span>
+            </div>
+            <h4 style="font-size: 16px; font-weight: 800;"><i class="ri-building-2-line"></i> ${cleanText(lib.name)}</h4>
+            <p style="font-size: 12px; color: var(--text-secondary);">${cleanText(lib.city || "موزع معتمد")} ${lib.phone ? "• " + cleanText(lib.phone) : ""}</p>
+          </div>
+
+          <div class="book-mini-stats">
+            <div><span>المورّد للمكتبة</span><strong>${supplied} نسخة</strong></div>
+            <div><span>المباع والمحصل</span><strong class="money-pos">${sold} نسخة (${formatEGP(collected)})</strong></div>
+          </div>
+
+          <div style="display: flex; gap: 6px;">
+            <button type="button" class="btn btn-primary" style="flex: 1; padding: 8px 10px;" data-action="open-library" data-id="${lib.id}">
+              <i class="ri-folder-open-line"></i><span>إدارة التوريد والتصفية</span>
+            </button>
+            ${
+              lib.phone
+                ? `<a href="${buildWhatsAppUrl(lib.phone, `السلام عليكم، نتواصل معكم من إدارة دار صفقات كتابية بخصوص كشف مبيعات الكتب...`)}" target="_blank" class="icon-btn" style="width: 36px; height: 36px; color: var(--pos);"><i class="ri-whatsapp-line"></i></a>`
+                : ""
+            }
+            <button type="button" class="icon-btn danger" style="width: 36px; height: 36px;" data-action="delete-library" data-id="${lib.id}">
+              <i class="ri-delete-bin-line"></i>
+            </button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderLibraryDetailPage(libId) {
+  const lib = state.libraries.find((x) => x.id === libId);
+  if (!lib) return;
+
+  const txs = state.libraryTransactions.filter((t) => t.libraryId === libId);
+  const supplied = txs.filter((t) => t.txType === "supply").reduce((s, t) => s + Number(t.qty || 0), 0);
+  const sold = txs.filter((t) => t.txType === "settle").reduce((s, t) => s + Number(t.qty || 0), 0);
+  const rem = Math.max(0, supplied - sold);
+  const collected = txs.filter((t) => t.txType === "settle").reduce((s, t) => s + Number(t.amount || 0), 0);
+
+  document.getElementById("library-detail-banner").innerHTML = `
+    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+      <div>
+        <h3 style="font-size: 18px; font-weight: 900;"><i class="ri-building-2-line"></i> ${cleanText(lib.name)}</h3>
+        <p style="font-size: 12.5px; color: var(--text-secondary);">${cleanText(lib.city || "")} • خصم التوزيع المتفق عليه: ${lib.discount || 0}% ${lib.notes ? "• " + cleanText(lib.notes) : ""}</p>
+      </div>
+      ${
+        lib.phone
+          ? `<a href="${buildWhatsAppUrl(lib.phone, `السلام عليكم، بخصوص جرد ومبيعات كتب دار صفقات كتابية لدى مكتبتكم...`)}" target="_blank" class="btn btn-pos"><i class="ri-whatsapp-line"></i><span>مراسلة المكتبة واتساب</span></a>`
+          : ""
+      }
+    </div>
+  `;
+
+  document.getElementById("lib-stat-supplied").textContent = `${supplied} نسخة`;
+  document.getElementById("lib-stat-sold").textContent = `${sold} نسخة`;
+  document.getElementById("lib-stat-rem").textContent = `${rem} نسخة`;
+  document.getElementById("lib-stat-collected").textContent = formatEGP(collected);
+
+  const bookMap = {};
+  txs.forEach((t) => {
+    if (!bookMap[t.bookId]) {
+      bookMap[t.bookId] = { title: t.bookTitle, supplied: 0, sold: 0, collected: 0 };
+    }
+    if (t.txType === "supply") bookMap[t.bookId].supplied += Number(t.qty || 0);
+    if (t.txType === "settle") {
+      bookMap[t.bookId].sold += Number(t.qty || 0);
+      bookMap[t.bookId].collected += Number(t.amount || 0);
+    }
+  });
+
+  const bookSummaryHTML = Object.values(bookMap)
+    .map(
+      (bm) => `
+      <div class="list-row">
+        <div>
+          <h4 style="font-size: 14px; font-weight: 800;">كتاب: ${cleanText(bm.title)}</h4>
+          <p style="font-size: 12px; color: var(--text-secondary);">المورّد: ${bm.supplied} نسخة • المباع والمحصل: <strong class="money-pos">${bm.sold} نسخة (${formatEGP(bm.collected)})</strong></p>
+        </div>
+        <span class="badge ${bm.supplied - bm.sold > 0 ? "neg" : "pos"}">متبقي بالمكتبة: ${Math.max(0, bm.supplied - bm.sold)} نسخة</span>
+      </div>`
+    )
+    .join("");
+
+  document.getElementById("library-inventory-list").innerHTML =
+    bookSummaryHTML ||
+    `<div class="surface-card" style="text-align: center; color: var(--text-muted); padding: 22px;">لم يتم توريد أي كتب لهذه المكتبة بعد. اضغط "توريد شحنة كتب للمكتبة".</div>`;
+}
+
+document.getElementById("btn-back-libraries").addEventListener("click", () => navigateToView("view-libraries"));
+
+document.getElementById("btn-lib-supply-books").addEventListener("click", () => {
+  if (!state.books.length) {
+    showToast("أضف كتاباً أولاً لتتمكن من توريده للمكتبة");
+    return;
+  }
+  document.getElementById("form-lib-supply").reset();
+  document.getElementById("supply-lib-id").value = state.selectedLibraryDetailId;
+  populateAllSelects();
+  navigateToView("view-form-lib-supply");
+});
+
+document.getElementById("form-lib-supply").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-supply");
+  await withSubmitLock(btn, async () => {
+    const libId = document.getElementById("supply-lib-id").value;
+    const lib = state.libraries.find((x) => x.id === libId);
+    const bookId = document.getElementById("supply-book-select").value;
+    const b = state.books.find((x) => x.id === bookId);
+    const qty = Math.max(1, Number(document.getElementById("supply-qty-field").value || 1));
+    const whId = document.getElementById("supply-wh-select").value;
+    const notes = document.getElementById("supply-notes-field").value.trim();
+
+    if (!lib || !b) {
+      showToast("يرجى اختيار الكتاب والمستودع");
+      return;
+    }
+
+    const availStock = Number(b.stock || 0);
+    if (availStock < qty) {
+      showToast(`عذراً، الرصيد الورقي المتاح (${availStock} نسخة) غير كافٍ لتوريد (${qty}) نسخة!`, "ri-error-warning-line");
+      return;
+    }
+
+    const upd = { stock: Math.max(0, availStock - qty) };
+    if (b.warehouseStocks && b.warehouseStocks[whId] !== undefined) {
+      upd.warehouseStocks = {
+        ...b.warehouseStocks,
+        [whId]: Math.max(0, Number(b.warehouseStocks[whId]) - qty)
+      };
+    }
+    await updateDoc(doc(db, "books", bookId), upd);
+
+    await addDoc(collection(db, "library_transactions"), {
+      txType: "supply",
+      libraryId: lib.id,
+      libraryName: lib.name,
+      bookId: b.id,
+      bookTitle: b.title,
+      qty,
+      whId,
+      notes,
+      dateString: getTodayStr(),
+      createdAt: serverTimestamp()
+    });
+
+    await logAudit("توريد لمكتبة", `توريد (${qty}) نسخة من "${b.title}" إلى (${lib.name})`);
+    showToast(`تم توريد (${qty}) نسخة إلى ${lib.name} وخصمها من المستودع`);
+    navigateToView("view-library-detail");
+  });
+});
+
+document.getElementById("btn-lib-settle-sales").addEventListener("click", () => {
+  const lib = state.libraries.find((x) => x.id === state.selectedLibraryDetailId);
+  if (!lib) return;
+  document.getElementById("form-lib-settle").reset();
+  document.getElementById("settle-lib-id").value = lib.id;
+  populateAllSelects();
+
+  const bookSel = document.getElementById("settle-book-select");
+  const qtyInp = document.getElementById("settle-qty-field");
+  const amtInp = document.getElementById("settle-amount-field");
+
+  const calcDefaultSettle = () => {
+    const b = state.books.find((x) => x.id === bookSel.value);
+    if (!b) return;
+    const q = Math.max(1, Number(qtyInp.value || 1));
+    const disc = Number(lib.discount || 0);
+    amtInp.value = Number((q * Number(b.price || 0) * (1 - disc / 100)).toFixed(2));
+  };
+  bookSel.onchange = calcDefaultSettle;
+  qtyInp.oninput = calcDefaultSettle;
+
+  navigateToView("view-form-lib-settle");
+});
+
+document.getElementById("form-lib-settle").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-settle");
+  await withSubmitLock(btn, async () => {
+    const libId = document.getElementById("settle-lib-id").value;
+    const lib = state.libraries.find((x) => x.id === libId);
+    const bookId = document.getElementById("settle-book-select").value;
+    const b = state.books.find((x) => x.id === bookId);
+    const qty = Math.max(1, Number(document.getElementById("settle-qty-field").value || 1));
+    const totalAmount = Number(document.getElementById("settle-amount-field").value || 0);
+    const notes = document.getElementById("settle-notes-field").value.trim();
+
+    if (!lib || !b) {
+      showToast("يرجى اختيار الكتاب");
+      return;
+    }
+
+    const authorCut = Number((totalAmount * (Number(b.royaltyRate || 0) / 100)).toFixed(2));
+    const houseCut = Number((totalAmount - authorCut).toFixed(2));
+
+    await updateDoc(doc(db, "books", bookId), { copiesSold: increment(qty) });
+
+    await addDoc(collection(db, "library_transactions"), {
+      txType: "settle",
+      libraryId: lib.id,
+      libraryName: lib.name,
+      bookId: b.id,
+      bookTitle: b.title,
+      qty,
+      amount: totalAmount,
+      notes,
+      dateString: getTodayStr(),
+      createdAt: serverTimestamp()
+    });
+
+    await addDoc(collection(db, "sales"), {
+      bookId: b.id,
+      bookTitle: b.title,
+      authorId: b.authorId,
+      authorName: b.authorName,
+      copyFormat: "paper",
+      qty,
+      unitPrice: Number(b.price || 0),
+      totalAmount,
+      channel: `مكتبة: ${lib.name}`,
+      authorCut,
+      houseCut,
+      soldBy: state.userEmail,
+      soldByName: state.userProfile.displayName,
+      dateString: getTodayStr(),
+      createdAt: serverTimestamp()
+    });
+
+    await logAudit(
+      "تحصيل مبيعات مكتبة",
+      `تصفية بيع (${qty}) نسخة من "${b.title}" لدى (${lib.name}) بمبلغ ${formatEGP(totalAmount)}`
+    );
+    showToast("تم اعتماد المبيعات وإيداع النسب في محفظة الدار ومحفظة المؤلف!");
+    navigateToView("view-library-detail");
+  });
+});
+
+// ==========================================================================
+// 17. وحدة المعارض والفعاليات (Exhibitions & Events Hub)
+// ==========================================================================
+document.getElementById("btn-goto-add-exhibition").addEventListener("click", () => openExhibitionForm(null));
+document.getElementById("qadd-exhibition").addEventListener("click", () => {
+  quickAddSheet.classList.remove("show");
+  openExhibitionForm(null);
+});
+
+document.getElementById("btn-exh-select-all-books").addEventListener("click", () => {
+  document.querySelectorAll("#exh-books-checklist input[type='checkbox']").forEach((c) => (c.checked = true));
+});
+document.getElementById("btn-exh-clear-all-books").addEventListener("click", () => {
+  document.querySelectorAll("#exh-books-checklist input[type='checkbox']").forEach((c) => (c.checked = false));
+});
+
+function openExhibitionForm(editId = null) {
+  const form = document.getElementById("form-exhibition");
+  form.reset();
+  document.getElementById("exh-dup-warning").classList.remove("show");
+  populateAllSelects();
+
+  const checks = document.querySelectorAll("#exh-books-checklist input[type='checkbox']");
+  if (editId) {
+    const x = state.exhibitions.find((e) => e.id === editId);
+    if (!x) return;
+    document.getElementById("exh-id-field").value = x.id;
+    document.getElementById("exh-name-field").value = x.name || "";
+    document.getElementById("exh-location-field").value = x.location || "";
+    document.getElementById("exh-prep-date").value = x.prepDate || "";
+    document.getElementById("exh-start-date").value = x.startDate || "";
+    document.getElementById("exh-end-date").value = x.endDate || "";
+    document.getElementById("exh-budget-field").value = x.budget || "";
+    document.getElementById("exh-notes-field").value = x.notes || "";
+    const selectedIds = x.bookIds || [];
+    checks.forEach((c) => (c.checked = selectedIds.includes(c.value)));
+    document.getElementById("form-exh-heading").textContent = `تعديل المعرض: ${x.name}`;
+  } else {
+    document.getElementById("exh-id-field").value = "";
+    document.getElementById("exh-start-date").value = getTodayStr();
+    checks.forEach((c) => (c.checked = true));
+    document.getElementById("form-exh-heading").textContent = "إنشاء معرض أو فعالية جديدة";
+  }
+  navigateToView("view-form-exhibition");
+}
+
+document.getElementById("form-exhibition").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-exhibition");
+  await withSubmitLock(btn, async () => {
+    const id = document.getElementById("exh-id-field").value;
+    const bookIds = Array.from(
+      document.querySelectorAll("#exh-books-checklist input[type='checkbox']:checked")
+    ).map((c) => c.value);
+
+    const payload = {
+      name: document.getElementById("exh-name-field").value.trim(),
+      location: document.getElementById("exh-location-field").value.trim(),
+      prepDate: document.getElementById("exh-prep-date").value,
+      startDate: document.getElementById("exh-start-date").value,
+      endDate: document.getElementById("exh-end-date").value,
+      budget: Number(document.getElementById("exh-budget-field").value || 0),
+      notes: document.getElementById("exh-notes-field").value.trim(),
+      bookIds
+    };
+
+    if (id) {
+      await updateDoc(doc(db, "exhibitions", id), payload);
+      await logAudit("تعديل معرض", `تحديث معرض: ${payload.name}`);
+      showToast("تم تحديث بيانات المعرض والكتب المشاركة");
+      state.selectedExhibitionDetailId = id;
+      navigateToView("view-exhibition-detail");
+    } else {
+      payload.createdAt = serverTimestamp();
+      const ref = await addDoc(collection(db, "exhibitions"), payload);
+      await logAudit("إنشاء معرض", `إنشاء معرض: ${payload.name} (${bookIds.length} كتاب مشارك)`);
+      clearDraftPrefix("exh_");
+      showToast("تم إنشاء المعرض واعتماد الكتب المشاركة بنجاح!");
+      state.selectedExhibitionDetailId = ref.id;
+      navigateToView("view-exhibition-detail");
+    }
+  });
+});
+
+function renderExhibitionsGrid() {
+  const box = document.getElementById("exhibitions-cards-grid");
+  if (!box) return;
+
+  if (!state.exhibitions.length) {
+    box.innerHTML = `<div class="surface-card" style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 30px;">لا توجد معارض مسجلة حالياً. اضغط "إنشاء معرض جديد".</div>`;
+    return;
+  }
+
+  box.innerHTML = state.exhibitions
+    .map((x) => {
+      const exhSales = state.sales.filter((s) => s.exhibitionId === x.id);
+      const rev = exhSales.reduce((s, item) => s + Number(item.totalAmount || 0), 0);
+      const exhExp = state.expenses
+        .filter((e) => e.exhibitionId === x.id)
+        .reduce((s, item) => s + Number(item.amount || 0), 0);
+      const booksCount = Array.isArray(x.bookIds) ? x.bookIds.length : 0;
+
+      return `
+        <div class="surface-card" style="display: flex; flex-direction: column; justify-content: space-between; gap: 12px;">
+          <div style="cursor: pointer;" data-action="open-exhibition" data-id="${x.id}">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+              <span class="badge invert">${booksCount} كتاب مشارك</span>
+              <span class="badge">${x.startDate || ""} إلى ${x.endDate || ""}</span>
+            </div>
+            <h4 style="font-size: 16px; font-weight: 800;"><i class="ri-compass-discover-line"></i> ${cleanText(x.name)}</h4>
+            <p style="font-size: 12px; color: var(--text-secondary);">${cleanText(x.location || "جناح الدار")}</p>
+          </div>
+
+          <div class="book-mini-stats">
+            <div><span>مبيعات الجناح</span><strong class="money-pos">${formatEGP(rev)}</strong></div>
+            <div><span>تكاليف المعرض</span><strong class="money-neg">${formatEGP(exhExp)}</strong></div>
+          </div>
+
+          <div style="display: flex; gap: 6px;">
+            <button type="button" class="btn btn-primary" style="flex: 1; padding: 8px 10px;" data-action="open-exhibition" data-id="${x.id}">
+              <i class="ri-store-2-line"></i><span>فتح جناح وحسابات المعرض</span>
+            </button>
+            <button type="button" class="icon-btn danger" style="width: 36px; height: 36px;" data-action="delete-exhibition" data-id="${x.id}">
+              <i class="ri-delete-bin-line"></i>
+            </button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderExhibitionDetailPage(exhId) {
+  const x = state.exhibitions.find((e) => e.id === exhId);
+  if (!x) return;
+
+  const exhSales = state.sales.filter((s) => s.exhibitionId === exhId);
+  const exhExpenses = state.expenses.filter((e) => e.exhibitionId === exhId);
+
+  const copies = exhSales.reduce((s, i) => s + Number(i.qty || 0), 0);
+  const rev = exhSales.reduce((s, i) => s + Number(i.totalAmount || 0), 0);
+  const authorsShare = exhSales.reduce((s, i) => s + Number(i.authorCut || 0), 0);
+  const expTotal = exhExpenses.reduce((s, i) => s + Number(i.amount || 0), 0);
+  const net = rev - authorsShare - expTotal;
+  const participatingBooks = state.books.filter((b) => Array.isArray(x.bookIds) && x.bookIds.includes(b.id));
+
+  document.getElementById("exhibition-detail-banner").innerHTML = `
+    <div>
+      <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px;">
+        <span class="badge invert">بداية التجهيز: ${x.prepDate || "غير محدد"}</span>
+        <span class="badge pos">انطلاق المعرض: ${x.startDate}</span>
+        <span class="badge neg">الانتهاء: ${x.endDate}</span>
+      </div>
+      <h3 style="font-size: 19px; font-weight: 900;">${cleanText(x.name)}</h3>
+      <p style="font-size: 12.5px; color: var(--text-secondary);">${cleanText(x.location || "")} ${x.notes ? "• " + cleanText(x.notes) : ""}</p>
+    </div>
+  `;
+
+  document.getElementById("exh-stat-rev").textContent = formatEGP(rev);
+  document.getElementById("exh-stat-copies").textContent = `${copies} نسخة مباعة بالمعرض`;
+  document.getElementById("exh-stat-exp").textContent = formatEGP(expTotal);
+  document.getElementById("exh-stat-budget").textContent = `الميزانية التقديرية: ${formatEGP(x.budget || 0)}`;
+
+  const netEl = document.getElementById("exh-stat-net");
+  netEl.textContent = formatEGP(net);
+  netEl.className = `metric-val ${net >= 0 ? "money-pos" : "money-neg"}`;
+  document.getElementById("exh-stat-books-count").textContent = `${participatingBooks.length} كتاب`;
+
+  document.getElementById("exhibition-books-grid").innerHTML = participatingBooks.length
+    ? participatingBooks
+        .map(
+          (b) => `
+        <div class="book-card">
+          <div class="book-body">
+            <div class="book-title-link" data-action="open-book" data-id="${b.id}">${cleanText(b.title)}</div>
+            <div class="book-author-link">${cleanText(b.authorName)}</div>
+            <div class="book-mini-stats">
+              <div><span>السعر</span><strong>${formatEGP(b.price)}</strong></div>
+              <div><span>المستودع الورقي</span><strong>${Number(b.stock || 0)}</strong></div>
+            </div>
+            <button type="button" class="btn btn-pos" style="width: 100%; padding: 8px;" data-action="sell-exh-book" data-id="${b.id}" data-exh="${x.id}">
+              <i class="ri-shopping-bag-3-line"></i><span>بيع في الجناح</span>
+            </button>
+          </div>
+        </div>`
+        )
+        .join("")
+    : `<div class="surface-card" style="grid-column: 1/-1; text-align: center; padding: 20px;">لم يتم تحديد كتب لهذا المعرض. اضغط "تعديل المعرض والكتب".</div>`;
+
+  document.getElementById("exhibition-expenses-list").innerHTML = exhExpenses.length
+    ? exhExpenses
+        .map(
+          (e) => `
+        <div class="list-row">
+          <div>
+            <h4 style="font-size: 14px; font-weight: 800;">${cleanText(e.title)} <span class="badge neg">-${formatEGP(e.amount)}</span></h4>
+            <p style="font-size: 12px; color: var(--text-secondary);">${cleanText(e.category)} • ${e.dateString}</p>
+          </div>
+          <button type="button" class="icon-btn danger" style="width: 32px; height: 32px;" data-action="delete-expense" data-id="${e.id}"><i class="ri-delete-bin-line"></i></button>
+        </div>`
+        )
+        .join("")
+    : `<div class="surface-card" style="text-align: center; color: var(--text-muted); padding: 18px;">لا توجد مصروفات مسجلة لهذا المعرض حتى الآن.</div>`;
+}
+
+document.getElementById("btn-back-exhibitions").addEventListener("click", () => navigateToView("view-exhibitions"));
+document.getElementById("btn-exh-edit").addEventListener("click", () => {
+  if (state.selectedExhibitionDetailId) openExhibitionForm(state.selectedExhibitionDetailId);
+});
+document.getElementById("btn-exh-add-expense").addEventListener("click", () => {
+  openExpenseForm("exhibition", state.selectedExhibitionDetailId);
+});
+
+// ==========================================================================
+// 18. إدارة الأحداث العامة، البيع الذكي (ورقي بشرط المخزون + إلكتروني)، والنماذج
+// ==========================================================================
+document.addEventListener("click", async (e) => {
+  const closeBtn = e.target.closest("[data-close-modal]");
+  if (closeBtn) {
+    document.getElementById(closeBtn.getAttribute("data-close-modal")).classList.remove("show");
+    return;
+  }
+
+  const act = e.target.closest("[data-action]");
+  if (!act) return;
+  e.stopPropagation();
+
+  const action = act.getAttribute("data-action");
+  const id = act.getAttribute("data-id");
+
+  if (action === "open-book") {
+    quickSearchPanel.style.display = "none";
+    state.selectedBookDetailId = id;
+    renderSingleBookDetail(id);
+    navigateToView("view-book-detail");
+  } else if (action === "edit-book") {
+    openBookFormPage(id, null);
+  } else if (action === "sell-book") {
+    openSellModal(id, "");
+  } else if (action === "sell-exh-book") {
+    openSellModal(id, act.getAttribute("data-exh") || "");
+  } else if (action === "toggle-fav") {
+    const b = state.books.find((x) => x.id === id);
+    if (b) {
+      await updateDoc(doc(db, "books", id), { isFavorite: !b.isFavorite });
+      showToast(!b.isFavorite ? "أُضيف للمفضلة" : "أُزيل من المفضلة");
+    }
+  } else if (action === "open-author") {
+    if (!id) return;
+    quickSearchPanel.style.display = "none";
+    state.selectedAuthorDetailId = id;
+    renderAuthorDetailPage(id);
+    navigateToView("view-author-detail");
+  } else if (action === "edit-author") {
+    openAuthorFormPage(id);
+  } else if (action === "approve-author-name") {
+    const a = state.authors.find((x) => x.id === id);
+    if (!a || !a.pendingNameRequest) return;
+    const newName = a.pendingNameRequest;
+    await updateDoc(doc(db, "authors", id), { name: newName, pendingNameRequest: "" });
+    const aBooks = state.books.filter((b) => b.authorId === id);
+    for (const b of aBooks) {
+      await updateDoc(doc(db, "books", b.id), { authorName: newName });
+    }
+    await logAudit("اعتماد تغيير اسم مؤلف", `الموافقة على تغيير اسم المؤلف إلى: ${newName}`);
+    showToast(`تم اعتماد الاسم الجديد (${newName}) وتحديث العقود!`);
+  } else if (action === "reject-author-name") {
+    const a = state.authors.find((x) => x.id === id);
+    if (!a) return;
+    await updateDoc(doc(db, "authors", id), { pendingNameRequest: "" });
+    showToast("تم رفض طلب تغيير الاسم");
+  } else if (action === "toggle-restrict-author") {
+    const a = state.authors.find((x) => x.id === id);
+    if (!a) return;
+    askConfirm(
+      a.restricted ? "فك تقييد المؤلف" : "تقييد حساب المؤلف",
+      `هل أنت متأكد من ${a.restricted ? "إعادة تفعيل" : "تجميد وتقييد"} حساب المؤلف "${a.name}"؟`,
+      async () => {
+        await updateDoc(doc(db, "authors", id), { restricted: !a.restricted });
+        await logAudit("حالة مؤلف", `${!a.restricted ? "تقييد" : "تفعيل"} حساب المؤلف: ${a.name}`);
+        showToast("تم تحديث حالة حساب المؤلف");
+      }
+    );
+  } else if (action === "delete-author-all") {
+    const a = state.authors.find((x) => x.id === id);
+    if (!a) return;
+    askConfirm(
+      "حذف شامل للمؤلف وكتبه",
+      `تحذير: سيتم حذف ملف المؤلف "${a.name}" وجميع الكتب المرتبطة به نهائياً. هل أنت متأكد؟`,
+      async () => {
+        const aBooks = state.books.filter((b) => b.authorId === id);
+        for (const b of aBooks) {
+          await deleteDoc(doc(db, "books", b.id));
+        }
+        await deleteDoc(doc(db, "authors", id));
+        await logAudit("حذف شامل لمؤلف", `حذف المؤلف (${a.name}) مع (${aBooks.length}) كتب`);
+        showToast("تم حذف المؤلف وكتبه بالكامل");
+        navigateToView("view-authors");
+      }
+    );
+  } else if (action === "open-library") {
+    quickSearchPanel.style.display = "none";
+    state.selectedLibraryDetailId = id;
+    renderLibraryDetailPage(id);
+    navigateToView("view-library-detail");
+  } else if (action === "delete-library") {
+    askConfirm("حذف ملف المكتبة", "هل أنت متأكد من حذف ملف هذه المكتبة؟", async () => {
+      await deleteDoc(doc(db, "libraries", id));
+      showToast("تم حذف المكتبة");
+    });
+  } else if (action === "open-exhibition") {
+    quickSearchPanel.style.display = "none";
+    state.selectedExhibitionDetailId = id;
+    renderExhibitionDetailPage(id);
+    navigateToView("view-exhibition-detail");
+  } else if (action === "delete-exhibition") {
+    askConfirm("حذف المعرض", "هل أنت متأكد من حذف هذا المعرض؟", async () => {
+      await deleteDoc(doc(db, "exhibitions", id));
+      showToast("تم حذف المعرض");
+    });
+  } else if (action === "delete-payout") {
+    askConfirm("حذف الحوالة", "هل أنت متأكد من حذف سجل هذه الدفعة؟", async () => {
+      await deleteDoc(doc(db, "payouts", id));
+      showToast("تم حذف الدفعة");
+    });
+  } else if (action === "delete-expense") {
+    askConfirm("حذف المصروف", "هل تريد حذف هذا المصروف التشغيلي؟", async () => {
+      await deleteDoc(doc(db, "expenses", id));
+      showToast("تم حذف المصروف");
+    });
+  } else if (action === "delete-sale") {
+    const bookId = act.getAttribute("data-book-id");
+    const qty = Number(act.getAttribute("data-qty") || 1);
+    const fmt = act.getAttribute("data-format") || "paper";
+    askConfirm("إلغاء عملية بيع", `سيتم إلغاء بيع (${qty}) نسخة واسترجاع الحسابات. هل أنت متأكد؟`, async () => {
+      await deleteDoc(doc(db, "sales", id));
+      if (bookId) {
+        if (fmt === "digital") {
+          await updateDoc(doc(db, "books", bookId), { digitalCopiesSold: increment(-qty) });
+        } else {
+          await updateDoc(doc(db, "books", bookId), { copiesSold: increment(-qty), stock: increment(qty) });
+        }
+      }
+      await logAudit("إلغاء بيع", `إلغاء بيع (${qty}) نسخة (${fmt === "digital" ? "إلكترونية" : "ورقية"})`);
+      showToast("تم إلغاء البيعة");
+    });
+  } else if (action === "edit-staff") {
+    openStaffFormPage(id);
+  } else if (action === "inspect-staff") {
+    state.inspectingStaffEmail = act.getAttribute("data-email");
+    document.getElementById("audit-log-title").innerHTML = `<i class="ri-eye-line"></i> <span>فحص سجل عمليات الموظف: ${cleanText(act.getAttribute("data-name"))}</span>`;
+    document.getElementById("btn-back-my-logs").style.display = "inline-flex";
+    renderAuditLogs();
+    navigateToView("view-profile");
+  } else if (action === "delete-staff") {
+    askConfirm("حذف موظف", "هل أنت متأكد من سحب الصلاحيات وحذف هذا الموظف؟", async () => {
+      await deleteDoc(doc(db, "staff", id));
+      showToast("تم حذف الموظف");
+    });
+  } else if (action === "open-custom-pdf") {
+    const b = state.books.find((x) => x.id === id);
+    if (!b) return;
+    const kind = act.getAttribute("data-kind");
+    const allowDl = act.getAttribute("data-dl") !== "false";
+    const url = kind === "print" ? b.printDrivePdfUrl : b.drivePdfUrl;
+    const label = kind === "print" ? `ملف كتاب: ${b.title}` : `وثيقة عقد: ${b.title}`;
+    openCustomPdfViewer(label, url, allowDl);
+  }
+});
+
+// --- نافذة البيع الذكي (تحقق صارم من المخزون للورقي + مرونة كاملة للإلكتروني) ---
+function openSellModal(bookId, exhId = "") {
+  const b = state.books.find((x) => x.id === bookId);
+  if (!b) return;
+  populateAllSelects();
+
+  document.getElementById("sell-confirm-book-id").value = b.id;
+  document.getElementById("sell-confirm-exh-id").value = exhId;
+  document.getElementById("sell-confirm-book-title").textContent = `${b.title} (ورقي: ${formatEGP(b.price)} | إلكتروني: ${formatEGP(b.digitalPrice || b.price)})`;
+
+  const fmtSel = document.getElementById("sell-confirm-format");
+  const qtyInp = document.getElementById("sell-confirm-qty");
+  const discInp = document.getElementById("sell-confirm-disc");
+  const chanSel = document.getElementById("sell-confirm-channel");
+  const whWrap = document.getElementById("sell-wh-field-wrap");
+  const whSel = document.getElementById("sell-confirm-wh");
+  const statusBanner = document.getElementById("sell-stock-status-banner");
+  const submitBtn = document.getElementById("btn-submit-sell-confirm");
+
+  fmtSel.value = Number(b.stock || 0) > 0 ? "paper" : "digital";
+  qtyInp.value = 1;
+  discInp.value = 0;
+  if (exhId) chanSel.value = "معرض كتاب";
+
+  const recalcAndValidateStock = () => {
+    const isDigital = fmtSel.value === "digital";
+    const q = Math.max(1, Number(qtyInp.value || 1));
+    const d = Math.min(90, Math.max(0, Number(discInp.value || 0)));
+    const unitPrice = isDigital ? Number(b.digitalPrice || b.price || 0) : Number(b.price || 0);
+    const net = q * unitPrice * (1 - d / 100);
+    document.getElementById("sell-confirm-total").textContent = formatEGP(net);
+
+    if (isDigital) {
+      whWrap.style.display = "none";
+      if (!exhId) chanSel.value = "نسخة إلكترونية / موقع";
+      statusBanner.style.background = "var(--pos-bg)";
+      statusBanner.style.color = "var(--pos)";
+      statusBanner.style.border = "1px solid var(--pos-border)";
+      statusBanner.innerHTML = `<i class="ri-smartphone-line"></i> بيع نسخة إلكترونية: لا يخصم من المستودع الورقي ويُوثق العائد فوراً للمؤلف والدار.`;
+      submitBtn.disabled = false;
+    } else {
+      whWrap.style.display = "block";
+      const totalStock = Number(b.stock || 0);
+      const selectedWhId = whSel.value;
+      const whStock =
+        b.warehouseStocks && b.warehouseStocks[selectedWhId] !== undefined
+          ? Number(b.warehouseStocks[selectedWhId])
+          : totalStock;
+
+      if (totalStock <= 0 || whStock < q) {
+        statusBanner.style.background = "var(--neg-bg)";
+        statusBanner.style.color = "var(--neg)";
+        statusBanner.style.border = "1px solid var(--neg-border)";
+        statusBanner.innerHTML = `<i class="ri-error-warning-line"></i> تنبيه: الرصيد الورقي المتاح بالمستودع (${whStock} نسخة) غير كافٍ لبيع (${q}) نسخة! أضف طبعة للمستودع أولاً أو اختر (نسخة إلكترونية).`;
+        submitBtn.disabled = true;
+      } else {
+        statusBanner.style.background = "var(--bg-subtle)";
+        statusBanner.style.color = "var(--text-main)";
+        statusBanner.style.border = "1px solid var(--border-strong)";
+        statusBanner.innerHTML = `<i class="ri-store-3-line"></i> الرصيد الورقي المتاح بالمستودع: (${whStock} نسخة) — جاهز للبيع.`;
+        submitBtn.disabled = false;
+      }
+    }
+  };
+
+  fmtSel.onchange = recalcAndValidateStock;
+  qtyInp.oninput = recalcAndValidateStock;
+  discInp.oninput = recalcAndValidateStock;
+  whSel.onchange = recalcAndValidateStock;
+  recalcAndValidateStock();
+
+  document.getElementById("modal-sell").classList.add("show");
+}
+
+document.getElementById("form-sell-confirm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-sell-confirm");
+  await withSubmitLock(btn, async () => {
+    const bookId = document.getElementById("sell-confirm-book-id").value;
+    const exhId = document.getElementById("sell-confirm-exh-id").value;
+    const copyFormat = document.getElementById("sell-confirm-format").value; // 'paper' | 'digital'
+    const qty = Math.max(1, Number(document.getElementById("sell-confirm-qty").value || 1));
+    const disc = Math.min(90, Math.max(0, Number(document.getElementById("sell-confirm-disc").value || 0)));
+    const channel = document.getElementById("sell-confirm-channel").value;
+    const whId = document.getElementById("sell-confirm-wh").value;
+
+    const b = state.books.find((x) => x.id === bookId);
+    if (!b) return;
+
+    if (copyFormat === "paper") {
+      const avail = Number(b.stock || 0);
+      if (avail < qty) {
+        showToast("عذراً، لا توجد كمية ورقية كافية في المستودع!", "ri-error-warning-line");
+        return;
+      }
+    }
+
+    const unitPrice = copyFormat === "digital" ? Number(b.digitalPrice || b.price || 0) : Number(b.price || 0);
+    const totalAmount = Number((qty * unitPrice * (1 - disc / 100)).toFixed(2));
+    const authorCut = Number((totalAmount * (Number(b.royaltyRate || 0) / 100)).toFixed(2));
+    const houseCut = Number((totalAmount - authorCut).toFixed(2));
+
+    document.getElementById("modal-sell").classList.remove("show");
+
+    if (copyFormat === "digital") {
+      await updateDoc(doc(db, "books", bookId), {
+        digitalCopiesSold: increment(qty)
+      });
+    } else {
+      const upd = {
+        copiesSold: increment(qty),
+        stock: Math.max(0, Number(b.stock || 0) - qty)
+      };
+      if (b.warehouseStocks && b.warehouseStocks[whId] !== undefined) {
+        upd.warehouseStocks = {
+          ...b.warehouseStocks,
+          [whId]: Math.max(0, Number(b.warehouseStocks[whId]) - qty)
+        };
+      }
+      await updateDoc(doc(db, "books", bookId), upd);
+    }
+
+    await addDoc(collection(db, "sales"), {
+      bookId: b.id,
+      bookTitle: b.title,
+      authorId: b.authorId,
+      authorName: b.authorName,
+      exhibitionId: exhId || "",
+      copyFormat,
+      qty,
+      discount: disc,
+      unitPrice,
+      totalAmount,
+      channel: copyFormat === "digital" ? `نسخة إلكترونية (${channel})` : channel,
+      authorCut,
+      houseCut,
+      soldBy: state.userEmail,
+      soldByName: state.userProfile.displayName,
+      dateString: getTodayStr(),
+      createdAt: serverTimestamp()
+    });
+
+    await logAudit(
+      "تسجيل بيع",
+      `بيع (${qty}) نسخة (${copyFormat === "digital" ? "إلكترونية" : "ورقية"}) من "${b.title}" بمبلغ ${formatEGP(totalAmount)}`
+    );
+    showToast(`تم توثيق بيع (${qty}) نسخة (${copyFormat === "digital" ? "إلكترونية" : "ورقية"}) من "${b.title}"!`);
+  });
+});
+
+// --- نماذج الإدخال الكاملة: المؤلف (مع الصورة الاختيارية) والكتاب (مع الأغلفة الـ 3 وملف الطباعة) ---
+document.getElementById("btn-top-add-author").addEventListener("click", () => openAuthorFormPage(null));
+document.getElementById("qadd-author").addEventListener("click", () => {
+  quickAddSheet.classList.remove("show");
+  openAuthorFormPage(null);
+});
+
+function openAuthorFormPage(editId = null) {
+  const form = document.getElementById("form-author");
+  form.reset();
+  if (editId) {
+    const a = state.authors.find((x) => x.id === editId);
+    if (!a) return;
+    document.getElementById("author-id-field").value = a.id;
+    document.getElementById("author-name-field").value = a.name || "";
+    document.getElementById("author-email-field").value = a.email || "";
+    document.getElementById("author-phone-field").value = a.phone || "";
+    document.getElementById("author-bio-field").value = a.bio || "";
+    document.getElementById("author-bank-name-field").value = a.bankName || "";
+    document.getElementById("author-bank-acc-field").value = a.bankAccount || "";
+    document.getElementById("author-bank-holder-field").value = a.bankHolder || "";
+    document.getElementById("author-bank-country-field").value = a.bankCountry || "";
+    document.getElementById("author-restricted-check").checked = !!a.restricted;
+    document.getElementById("form-author-title").textContent = `تعديل بيانات المؤلف: ${a.name}`;
+  } else {
+    document.getElementById("author-id-field").value = "";
+    document.getElementById("form-author-title").textContent = "إنشاء ملف مؤلف جديد";
+    restoreDraftPrefix("author_");
+  }
+  navigateToView("view-form-author");
+}
+
+document.getElementById("form-author").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-author");
+  await withSubmitLock(btn, async () => {
+    const id = document.getElementById("author-id-field").value;
+    const avatarFile = document.getElementById("author-avatar-file").files[0];
+
+    const payload = {
+      name: document.getElementById("author-name-field").value.trim(),
+      email: document.getElementById("author-email-field").value.trim().toLowerCase(),
+      phone: document.getElementById("author-phone-field").value.trim(),
+      bio: document.getElementById("author-bio-field").value.trim(),
+      bankName: document.getElementById("author-bank-name-field").value.trim(),
+      bankAccount: document.getElementById("author-bank-acc-field").value.trim(),
+      bankHolder: document.getElementById("author-bank-holder-field").value.trim(),
+      bankCountry: document.getElementById("author-bank-country-field").value.trim(),
+      restricted: document.getElementById("author-restricted-check").checked
+    };
+
+    if (avatarFile) {
+      showToast("جاري رفع الصورة الشخصية للمؤلف...");
+      payload.avatarUrl = await uploadCompressedImage(avatarFile, 500, 0.8);
+    }
+
+    if (id) {
+      await updateDoc(doc(db, "authors", id), payload);
+      const aBooks = state.books.filter((b) => b.authorId === id);
+      for (const b of aBooks) {
+        if (b.authorName !== payload.name) {
+          await updateDoc(doc(db, "books", b.id), { authorName: payload.name });
+        }
+      }
+      await logAudit("تعديل مؤلف", `تحديث بيانات المؤلف: ${payload.name}`);
+      clearDraftPrefix("author_");
+      showToast("تم حفظ تعديلات المؤلف بنجاح");
+      state.selectedAuthorDetailId = id;
+      navigateToView("view-author-detail");
+    } else {
+      payload.createdAt = serverTimestamp();
+      const ref = await addDoc(collection(db, "authors"), payload);
+      await logAudit("إضافة مؤلف", `إنشاء ملف المؤلف: ${payload.name}`);
+      clearDraftPrefix("author_");
+      showToast("تم إنشاء ملف المؤلف بنجاح!");
+      state.selectedAuthorDetailId = ref.id;
+      navigateToView("view-author-detail");
+    }
+  });
+});
+
+document.getElementById("btn-top-add-contract").addEventListener("click", () => openBookFormPage(null, null));
+document.getElementById("qadd-contract").addEventListener("click", () => {
+  quickAddSheet.classList.remove("show");
+  openBookFormPage(null, null);
+});
+document.getElementById("btn-author-new-contract").addEventListener("click", () => {
+  openBookFormPage(null, state.selectedAuthorDetailId);
+});
+
+function openBookFormPage(editId = null, preAuthorId = null) {
+  if (!state.authors.length) {
+    showToast("أنشئ ملف مؤلف أولاً قبل إضافة عقد كتاب");
+    openAuthorFormPage(null);
+    return;
+  }
+  const form = document.getElementById("form-book");
+  form.reset();
+  document.getElementById("book-dup-warning").classList.remove("show");
+  populateAllSelects();
+
+  if (editId) {
+    const b = state.books.find((x) => x.id === editId);
+    if (!b) return;
+    document.getElementById("book-id-field").value = b.id;
+    document.getElementById("book-title-field").value = b.title || "";
+    document.getElementById("book-author-select").value = b.authorId || "";
+    document.getElementById("book-price-field").value = b.price || "";
+    document.getElementById("book-digital-price-field").value = b.digitalPrice || "";
+    document.getElementById("book-royalty-field").value = b.royaltyRate ?? 20;
+    document.getElementById("book-months-field").value = b.contractMonths || 24;
+    document.getElementById("book-date-field").value = b.contractDate || getTodayStr();
+    document.getElementById("book-fav-check").checked = !!b.isFavorite;
+    document.getElementById("book-stock-field").value = Number(b.stock || 0);
+    document.getElementById("book-edition-field").value = b.edition || "";
+    document.getElementById("book-isbn-field").value = b.isbn || "";
+    document.getElementById("book-cat-field").value = b.category || "";
+    document.getElementById("book-drive-field").value = b.drivePdfUrl || "";
+    document.getElementById("book-print-drive-field").value = b.printDrivePdfUrl || "";
+    document.getElementById("book-author-access-select").value = b.authorAccessMode || "full_download";
+    document.getElementById("book-notes-field").value = b.notes || "";
+    document.getElementById("form-book-title").textContent = `تعديل عقد وأرشيف كتاب: ${b.title}`;
+  } else {
+    document.getElementById("book-id-field").value = "";
+    document.getElementById("book-date-field").value = getTodayStr();
+    document.getElementById("book-author-access-select").value = "full_download";
+    restoreDraftPrefix("book_");
+    if (preAuthorId) document.getElementById("book-author-select").value = preAuthorId;
+    document.getElementById("form-book-title").textContent = "توثيق عقد كتاب جديد";
+  }
+  refreshSmartPickersUI();
+  navigateToView("view-form-book");
+}
+
+document.getElementById("form-book").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-book");
+  await withSubmitLock(btn, async () => {
+    const id = document.getElementById("book-id-field").value;
+    const authorId = document.getElementById("book-author-select").value;
+    const authorObj = state.authors.find((a) => a.id === authorId);
+    if (!authorId || !authorObj) {
+      showToast("يرجى البحث واختيار المؤلف صاحب العقد أولاً");
+      return;
+    }
+
+    const frontFile = document.getElementById("book-cover-file").files[0];
+    const backFile = document.getElementById("book-back-cover-file").files[0];
+    const spreadFile = document.getElementById("book-spread-cover-file").files[0];
+
+    const stockNum = Math.max(0, Number(document.getElementById("book-stock-field").value || 0));
+    const whId = document.getElementById("book-warehouse-select").value;
+    const priceNum = Number(document.getElementById("book-price-field").value || 0);
+    const digPriceRaw = document.getElementById("book-digital-price-field").value;
+
+    const payload = {
+      title: document.getElementById("book-title-field").value.trim(),
+      authorId,
+      authorName: authorObj.name,
+      price: priceNum,
+      digitalPrice: digPriceRaw !== "" ? Number(digPriceRaw) : priceNum,
+      royaltyRate: Number(document.getElementById("book-royalty-field").value || 0),
+      contractMonths: Number(document.getElementById("book-months-field").value || 24),
+      contractDate: document.getElementById("book-date-field").value,
+      isFavorite: document.getElementById("book-fav-check").checked,
+      stock: stockNum,
+      edition: document.getElementById("book-edition-field").value.trim(),
+      isbn: document.getElementById("book-isbn-field").value.trim(),
+      category: document.getElementById("book-cat-field").value.trim(),
+      drivePdfUrl: document.getElementById("book-drive-field").value.trim(),
+      printDrivePdfUrl: document.getElementById("book-print-drive-field").value.trim(),
+      authorAccessMode: document.getElementById("book-author-access-select").value,
+      notes: document.getElementById("book-notes-field").value.trim()
+    };
+
+    if (frontFile) {
+      showToast("جاري رفع الغلاف الأمامي...");
+      payload.coverUrl = await uploadCompressedImage(frontFile, 900, 0.8);
+    }
+    if (backFile) {
+      showToast("جاري رفع الغلاف الخلفي...");
+      payload.backCoverUrl = await uploadCompressedImage(backFile, 900, 0.8);
+    }
+    if (spreadFile) {
+      showToast("جاري رفع الغلاف المزدوج الكامل...");
+      payload.spreadCoverUrl = await uploadCompressedImage(spreadFile, 1400, 0.84);
+    }
+
+    if (id) {
+      const existing = state.books.find((x) => x.id === id);
+      payload.copiesSold = Number(existing?.copiesSold || 0);
+      payload.digitalCopiesSold = Number(existing?.digitalCopiesSold || 0);
+      await updateDoc(doc(db, "books", id), payload);
+      await logAudit("تعديل عقد كتاب", `تحديث كتاب: ${payload.title}`);
+      clearDraftPrefix("book_");
+      showToast("تم تحديث الكتاب والأرشيف بنجاح");
+      state.selectedBookDetailId = id;
+      navigateToView("view-book-detail");
+    } else {
+      payload.copiesSold = 0;
+      payload.digitalCopiesSold = 0;
+      payload.initialPrinted = stockNum;
+      if (whId) {
+        payload.warehouseStocks = { [whId]: stockNum };
+      }
+      payload.createdAt = serverTimestamp();
+      const ref = await addDoc(collection(db, "books"), payload);
+      await logAudit("إضافة عقد كتاب", `توثيق عقد كتاب "${payload.title}" للمؤلف ${payload.authorName}`);
+      clearDraftPrefix("book_");
+      showToast("تم توثيق عقد الكتاب وإيداعه بالمستودع والأرشيف!");
+      state.selectedBookDetailId = ref.id;
+      navigateToView("view-book-detail");
+    }
+  });
+});
+
+// --- المصروفات المرنة ---
+document.getElementById("btn-top-add-expense").addEventListener("click", () => openExpenseForm("general", ""));
+document.getElementById("qadd-expense").addEventListener("click", () => {
+  quickAddSheet.classList.remove("show");
+  openExpenseForm("general", "");
+});
+
+document.getElementById("expense-scope-select").addEventListener("change", (e) => {
+  const val = e.target.value;
+  document.getElementById("expense-books-picker-wrap").style.display = val === "books" ? "block" : "none";
+  document.getElementById("expense-exhibition-picker-wrap").style.display = val === "exhibition" ? "block" : "none";
+});
+
+document.getElementById("btn-exp-select-all-books").addEventListener("click", () => {
+  document.querySelectorAll("#expense-books-checklist input[type='checkbox']").forEach((c) => (c.checked = true));
+});
+
+function openExpenseForm(defaultScope = "general", exhId = "") {
+  document.getElementById("form-expense").reset();
+  populateAllSelects();
+  document.getElementById("expense-scope-select").value = defaultScope;
+  document.getElementById("expense-books-picker-wrap").style.display = defaultScope === "books" ? "block" : "none";
+  document.getElementById("expense-exhibition-picker-wrap").style.display =
+    defaultScope === "exhibition" ? "block" : "none";
+  if (exhId) document.getElementById("expense-exhibition-select").value = exhId;
+  refreshSmartPickersUI();
+  navigateToView("view-form-expense");
+}
+
+document.getElementById("form-expense").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-expense");
+  await withSubmitLock(btn, async () => {
+    const title = document.getElementById("expense-title-field").value.trim();
+    const amount = Number(document.getElementById("expense-amount-field").value || 0);
+    const category = document.getElementById("expense-cat-field").value;
+    const scope = document.getElementById("expense-scope-select").value;
+
+    let bookIds = [];
+    let exhibitionId = "";
+
+    if (scope === "books") {
+      bookIds = Array.from(
+        document.querySelectorAll("#expense-books-checklist input[type='checkbox']:checked")
+      ).map((c) => c.value);
+      if (!bookIds.length) {
+        showToast("يرجى اختيار كتاب واحد على الأقل لربط المصروف به");
+        return;
+      }
+    } else if (scope === "exhibition") {
+      exhibitionId = document.getElementById("expense-exhibition-select").value;
+    }
+
+    await addDoc(collection(db, "expenses"), {
+      title,
+      amount,
+      category,
+      scope,
+      bookIds,
+      exhibitionId,
+      addedBy: state.userProfile.displayName,
+      dateString: getTodayStr(),
+      createdAt: serverTimestamp()
+    });
+
+    await logAudit("تسجيل مصروف", `مصروف (${title}) بقيمة ${formatEGP(amount)}`);
+    clearDraftPrefix("exp_");
+    showToast("تم توثيق المصروف وربطه بالحسابات بنجاح!");
+    navigateToView(exhibitionId ? "view-exhibition-detail" : "view-finance");
+  });
+});
+
+// --- الدفعات والحوالات للمؤلفين ---
+document.getElementById("btn-author-new-payout").addEventListener("click", () => {
+  openPayoutForm(state.selectedAuthorDetailId);
+});
+document.getElementById("qadd-payout").addEventListener("click", () => {
+  quickAddSheet.classList.remove("show");
+  openPayoutForm(null);
+});
+
+document.getElementById("payout-author-select").addEventListener("change", (e) => {
+  updatePayoutBankPreview(e.target.value);
+});
+
+function updatePayoutBankPreview(authorId) {
+  const box = document.getElementById("payout-author-bank-preview");
+  const a = state.authors.find((x) => x.id === authorId);
+  if (!a) {
+    box.innerHTML = "ابحث واختر المؤلف لعرض بياناته البنكية المعتمدة هنا.";
+    return;
+  }
+  if (a.bankAccount || a.bankName) {
+    box.innerHTML = `<strong>البيانات البنكية للمؤلف:</strong> ${cleanText(a.bankMethod || "")} - ${cleanText(a.bankName || "")} | المستفيد: ${cleanText(a.bankHolder || a.name)} | الحساب/IBAN: <span dir="ltr" style="font-family: monospace; font-weight: 800;">${cleanText(a.bankAccount || "")}</span>`;
+    const methodField = document.getElementById("payout-method-field");
+    if (!methodField.value && (a.bankMethod || a.bankName)) {
+      methodField.value = `${a.bankMethod || ""} - ${a.bankName || ""}`.replace(/^ - | - $/g, "");
+    }
+  } else {
+    box.innerHTML = `<span class="money-neg">لم يضف هذا المؤلف بياناته البنكية بعد.</span>`;
+  }
+}
+
+function openPayoutForm(preAuthorId = null) {
+  if (!state.authors.length) {
+    showToast("أضف مؤلفاً أولاً");
+    return;
+  }
+  document.getElementById("form-payout").reset();
+  populateAllSelects();
+  if (preAuthorId) {
+    document.getElementById("payout-author-select").value = preAuthorId;
+  }
+  refreshSmartPickersUI();
+  updatePayoutBankPreview(document.getElementById("payout-author-select").value);
+  navigateToView("view-form-payout");
+}
+
+document.getElementById("form-payout").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-payout");
+  await withSubmitLock(btn, async () => {
+    const authorId = document.getElementById("payout-author-select").value;
+    const author = state.authors.find((a) => a.id === authorId);
+    if (!authorId || !author) {
+      showToast("يرجى اختيار المؤلف المستفيد");
+      return;
+    }
+    const amount = Number(document.getElementById("payout-amount-field").value || 0);
+    const method = document.getElementById("payout-method-field").value.trim();
+    const notes = document.getElementById("payout-notes-field").value.trim();
+    const file = document.getElementById("payout-receipt-file").files[0];
+
+    let receiptUrl = "";
+    if (file) {
+      showToast("جاري ضغط ورفع صورة الإيصال...");
+      receiptUrl = await uploadCompressedImage(file, 1000, 0.8);
+    }
+
+    await addDoc(collection(db, "payouts"), {
+      authorId,
+      authorName: author.name,
+      amount,
+      method,
+      notes,
+      receiptUrl,
+      paidBy: state.userEmail,
+      dateString: getTodayStr(),
+      createdAt: serverTimestamp()
+    });
+
+    await logAudit("تسديد دفعة لمؤلف", `تحويل ${formatEGP(amount)} للمؤلف (${author.name}) عبر ${method}`);
+    clearDraftPrefix("payout_");
+    showToast("تم توثيق الدفعة والإيصال بنجاح!");
+    state.selectedAuthorDetailId = authorId;
+    renderAuthorDetailPage(authorId);
+    navigateToView("view-author-detail");
+  });
+});
+
+// ==========================================================================
+// 19. السجل المالي الشامل + الموظفون + التنبيهات + الحاسبة الذكية فائقة الوضوح
+// ==========================================================================
+document.querySelectorAll("[data-fin-range]").forEach((pill) => {
+  pill.addEventListener("click", () => {
+    document.querySelectorAll("[data-fin-range]").forEach((p) => p.classList.remove("active"));
+    pill.classList.add("active");
+    const range = pill.getAttribute("data-fin-range");
+    const now = new Date();
+    let from = "";
+    const to = getTodayStr();
+
+    if (range === "today") {
+      from = to;
+    } else if (range === "week") {
+      const d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      from = d.toISOString().split("T")[0];
+    } else if (range === "month") {
+      const d = new Date(now.getFullYear(), now.getMonth(), 1);
+      from = d.toISOString().split("T")[0];
+    }
+
+    state.finDateFrom = from;
+    state.finDateTo = range === "all" ? "" : to;
+    document.getElementById("fin-date-from").value = state.finDateFrom;
+    document.getElementById("fin-date-to").value = state.finDateTo;
+    renderFinanceTimeline();
+  });
+});
+
+document.getElementById("btn-apply-fin-dates").addEventListener("click", () => {
+  document.querySelectorAll("[data-fin-range]").forEach((p) => p.classList.remove("active"));
+  state.finDateFrom = document.getElementById("fin-date-from").value;
+  state.finDateTo = document.getElementById("fin-date-to").value;
+  renderFinanceTimeline();
+});
+
+function renderFinanceTimeline() {
+  const box = document.getElementById("finance-timeline-list");
+  if (!box) return;
+
+  const allItems = sortDesc([
+    ...state.sales.map((s) => ({ ...s, kind: "sale" })),
+    ...state.expenses.map((x) => ({ ...x, kind: "expense" })),
+    ...state.payouts.map((p) => ({ ...p, kind: "payout" }))
+  ]).filter((item) => isDateWithinRange(item.dateString, state.finDateFrom, state.finDateTo));
+
+  let periodIn = 0;
+  let periodOut = 0;
+
+  allItems.forEach((item) => {
+    if (item.kind === "sale") periodIn += Number(item.totalAmount || 0);
+    else periodOut += Number(item.amount || 0);
+  });
+
+  const periodNet = periodIn - periodOut;
+  document.getElementById("fin-period-in").textContent = formatEGP(periodIn);
+  document.getElementById("fin-period-out").textContent = formatEGP(periodOut);
+  const netEl = document.getElementById("fin-period-net");
+  netEl.textContent = formatEGP(periodNet);
+  netEl.className = `metric-val ${periodNet >= 0 ? "money-pos" : "money-neg"}`;
+
+  if (!allItems.length) {
+    box.innerHTML = `<div class="surface-card" style="text-align: center; color: var(--text-muted); padding: 30px;">لا توجد حركات مالية ضمن الفترة المحددة.</div>`;
+    return;
+  }
+
+  box.innerHTML = allItems
+    .slice(0, 100)
+    .map((item) => {
+      if (item.kind === "sale") {
+        const qty = Number(item.qty || 1);
+        const tot = Number(item.totalAmount || 0);
+        const isDig = item.copyFormat === "digital";
+        return `
+          <div class="list-row">
+            <div>
+              <h4 style="font-size: 14px; font-weight: 800;">
+                بيع (${qty} نسخة ${isDig ? "إلكترونية" : "ورقية"}): ${cleanText(item.bookTitle)}
+                <span class="badge pos">+${formatEGP(tot)}</span>
+              </h4>
+              <p style="font-size: 12px; color: var(--text-secondary);">المؤلف: ${cleanText(item.authorName)} • القناة: ${cleanText(item.channel)} • بواسطة: ${cleanText(item.soldByName || item.soldBy)} • ${item.dateString}</p>
+            </div>
+            ${
+              state.userRole === "super_admin"
+                ? `<button type="button" class="icon-btn danger" style="width: 32px; height: 32px;" data-action="delete-sale" data-id="${item.id}" data-book-id="${item.bookId}" data-qty="${qty}" data-format="${item.copyFormat || "paper"}"><i class="ri-delete-bin-line"></i></button>`
+                : ""
+            }
+          </div>`;
+      } else if (item.kind === "payout") {
+        return `
+          <div class="list-row">
+            <div>
+              <h4 style="font-size: 14px; font-weight: 800;">دفعة لمؤلف: ${cleanText(item.authorName)} <span class="badge neg">-${formatEGP(item.amount)}</span></h4>
+              <p style="font-size: 12px; color: var(--text-secondary);">الطريقة: ${cleanText(item.method)} • ${item.dateString} ${item.receiptUrl ? `• <a href="${item.receiptUrl}" target="_blank" style="font-weight: 800; color: var(--text-main);">عرض الإيصال</a>` : ""}</p>
+            </div>
+          </div>`;
+      } else {
+        const linkedCount = Array.isArray(item.bookIds) ? item.bookIds.length : 0;
+        return `
+          <div class="list-row">
+            <div>
+              <h4 style="font-size: 14px; font-weight: 800;">مصروف: ${cleanText(item.title)} <span class="badge neg">-${formatEGP(item.amount)}</span></h4>
+              <p style="font-size: 12px; color: var(--text-secondary);">${cleanText(item.category)} ${linkedCount ? `• موزعة على (${linkedCount}) كتب` : ""} • بواسطة: ${cleanText(item.addedBy)} • ${item.dateString}</p>
+            </div>
+            ${
+              state.permissions.expenses
+                ? `<button type="button" class="icon-btn danger" style="width: 32px; height: 32px;" data-action="delete-expense" data-id="${item.id}"><i class="ri-delete-bin-line"></i></button>`
+                : ""
+            }
+          </div>`;
+      }
+    })
+    .join("");
+}
+
+// الموظفون
+document.getElementById("btn-top-add-staff").addEventListener("click", () => openStaffFormPage(null));
+document.getElementById("btn-staff-all-perms").addEventListener("click", () => {
+  ["perm-sell", "perm-add-book", "perm-delete-book", "perm-authors", "perm-payouts", "perm-expenses", "perm-finance-view", "perm-reports"].forEach(
+    (id) => (document.getElementById(id).checked = true)
+  );
+});
+document.getElementById("btn-staff-sell-only").addEventListener("click", () => {
+  ["perm-add-book", "perm-delete-book", "perm-authors", "perm-payouts", "perm-expenses", "perm-finance-view", "perm-reports"].forEach(
+    (id) => (document.getElementById(id).checked = false)
+  );
+  document.getElementById("perm-sell").checked = true;
+});
+
+function openStaffFormPage(editId = null) {
+  const form = document.getElementById("form-staff");
+  form.reset();
+  if (editId) {
+    const s = state.staff.find((x) => x.id === editId);
+    if (!s) return;
+    document.getElementById("staff-id-field").value = s.id;
+    document.getElementById("staff-name-field").value = s.name || "";
+    document.getElementById("staff-email-field").value = s.email || "";
+    document.getElementById("staff-job-field").value = s.jobTitle || "";
+    const p = s.permissions || FULL_PERMS;
+    document.getElementById("perm-sell").checked = !!p.sell;
+    document.getElementById("perm-add-book").checked = p.addBook !== undefined ? !!p.addBook : true;
+    document.getElementById("perm-delete-book").checked = !!p.deleteBook;
+    document.getElementById("perm-authors").checked = p.authors !== undefined ? !!p.authors : true;
+    document.getElementById("perm-payouts").checked = !!p.payouts;
+    document.getElementById("perm-expenses").checked = !!p.expenses;
+    document.getElementById("perm-finance-view").checked = !!p.financeView;
+    document.getElementById("perm-reports").checked = p.reports !== undefined ? !!p.reports : true;
+    document.getElementById("staff-restricted-check").checked = !!s.restricted;
+    document.getElementById("form-staff-title").textContent = `تعديل صلاحيات الموظف: ${s.name}`;
+  } else {
+    document.getElementById("staff-id-field").value = "";
+    document.getElementById("form-staff-title").textContent = "إضافة موظف وتخصيص صلاحياته";
+  }
+  navigateToView("view-form-staff");
+}
+
+document.getElementById("form-staff").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-staff");
+  await withSubmitLock(btn, async () => {
+    const id = document.getElementById("staff-id-field").value;
+    const email = document.getElementById("staff-email-field").value.trim().toLowerCase();
+    if (isSuperAdminEmail(email)) {
+      showToast("هذا البريد يتبع للإدارة العليا تلقائياً");
+      return;
+    }
+    const permissions = {
+      sell: document.getElementById("perm-sell").checked,
+      addBook: document.getElementById("perm-add-book").checked,
+      deleteBook: document.getElementById("perm-delete-book").checked,
+      authors: document.getElementById("perm-authors").checked,
+      payouts: document.getElementById("perm-payouts").checked,
+      expenses: document.getElementById("perm-expenses").checked,
+      financeView: document.getElementById("perm-finance-view").checked,
+      reports: document.getElementById("perm-reports").checked
+    };
+    const payload = {
+      name: document.getElementById("staff-name-field").value.trim(),
+      email,
+      jobTitle: document.getElementById("staff-job-field").value.trim(),
+      permissions,
+      restricted: document.getElementById("staff-restricted-check").checked
+    };
+    if (id) {
+      await updateDoc(doc(db, "staff", id), payload);
+      showToast("تم تحديث صلاحيات الموظف");
+    } else {
+      payload.createdAt = serverTimestamp();
+      await addDoc(collection(db, "staff"), payload);
+      showToast("تم اعتماد الموظف وصلاحياته!");
+    }
+    navigateToView("view-staff");
+  });
+});
+
+function renderStaffGrid() {
+  const box = document.getElementById("staff-cards-grid");
+  if (!box) return;
+  const list = state.staff.filter((s) => !isSuperAdminEmail(s.email));
+  if (!list.length) {
+    box.innerHTML = `<div class="surface-card" style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 30px;">لا يوجد موظفون مضافون بعد.</div>`;
+    return;
+  }
+  box.innerHTML = list
+    .map((s) => {
+      const logsCount = state.activityLogs.filter((l) => l.actorEmail === s.email).length;
+      const activePerms = Object.values(s.permissions || {}).filter(Boolean).length;
+      return `
+        <div class="surface-card" style="display: flex; flex-direction: column; gap: 10px;">
+          <div style="display: flex; justify-content: space-between;">
+            <span class="badge ${s.restricted ? "neg" : "pos"}">${s.restricted ? "مقيّد / موقوف" : `نشط (${activePerms}/8 صلاحيات)`}</span>
+            <span class="badge">${logsCount} عملية موثقة</span>
+          </div>
+          <div>
+            <h4 style="font-size: 16px; font-weight: 800;">${cleanText(s.name)}</h4>
+            <p style="font-size: 12px; color: var(--text-secondary);" dir="ltr">${cleanText(s.email)}</p>
+          </div>
+          <div style="display: flex; gap: 6px; margin-top: auto;">
+            <button type="button" class="btn btn-outline" style="flex: 1; padding: 7px 10px;" data-action="inspect-staff" data-email="${s.email}" data-name="${s.name}">
+              <i class="ri-eye-line"></i><span>سجل عملياته</span>
+            </button>
+            <button type="button" class="icon-btn" style="width: 34px; height: 34px;" data-action="edit-staff" data-id="${s.id}"><i class="ri-equalizer-line"></i></button>
+            <button type="button" class="icon-btn danger" style="width: 34px; height: 34px;" data-action="delete-staff" data-id="${s.id}"><i class="ri-delete-bin-line"></i></button>
+          </div>
+        </div>`;
+    })
+    .join("");
+}
+
+// التنبيهات وطلبات المراجعة
+document.getElementById("btn-staff-send-notif").addEventListener("click", () => {
+  populateAllSelects();
+  navigateToView("view-form-notif");
+});
+document.getElementById("btn-notif-new").addEventListener("click", () => {
+  populateAllSelects();
+  navigateToView("view-form-notif");
+});
+
+document.getElementById("form-notif").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-submit-notif");
+  await withSubmitLock(btn, async () => {
+    await addDoc(collection(db, "notifications"), {
+      target: document.getElementById("notif-target-select").value || "all",
+      priority: document.getElementById("notif-priority-select").value,
+      title: document.getElementById("notif-title-field").value.trim(),
+      body: document.getElementById("notif-body-field").value.trim(),
+      senderName: state.userProfile.displayName || "الإدارة",
+      dateString: getTodayStr(),
+      createdAt: serverTimestamp()
+    });
+    e.target.reset();
+    showToast("تم إرسال التنبيه بنجاح");
+    navigateToView("view-notifications");
+  });
+});
+
+function renderNotificationsView() {
+  const box = document.getElementById("notifications-stack-list");
+  if (!box) return;
+
+  const pendingAuthors = state.authors.filter((a) => !!a.pendingNameRequest);
+  const mine = state.notifications.filter(
+    (n) => state.userRole === "super_admin" || n.target === "all" || n.target === state.userEmail
+  );
+
+  const totalCount = mine.length + pendingAuthors.length;
+  const badge = document.getElementById("drawer-notif-badge");
+  const dot = document.getElementById("header-notif-dot");
+
+  if (totalCount > 0) {
+    badge.textContent = totalCount;
+    badge.style.display = "inline-block";
+    dot.style.display = "block";
+  } else {
+    badge.style.display = "none";
+    dot.style.display = "none";
+  }
+
+  const reqCardsHTML = pendingAuthors
+    .map(
+      (a) => `
+      <div class="list-row" style="border-right: 4px solid var(--neg); background: var(--neg-bg);">
+        <div>
+          <span class="badge neg">طلب مراجعة اسم مؤلف</span>
+          <h4 style="font-size: 14.5px; font-weight: 800; margin-top: 4px;">المؤلف (${cleanText(a.name)}) يطلب تغيير اسمه إلى: <span class="money-pos">${cleanText(a.pendingNameRequest)}</span></h4>
+        </div>
+        <div style="display: flex; gap: 6px;">
+          <button type="button" class="btn btn-pos" style="padding: 6px 12px; font-size: 12px;" data-action="approve-author-name" data-id="${a.id}">موافقة واعتماد</button>
+          <button type="button" class="btn btn-neg" style="padding: 6px 12px; font-size: 12px;" data-action="reject-author-name" data-id="${a.id}">رفض</button>
+        </div>
+      </div>`
+    )
+    .join("");
+
+  const notifHTML = mine
+    .map(
+      (n) => `
+      <div class="list-row" style="border-right: 4px solid ${n.priority === "urgent" ? "var(--neg)" : "var(--text-main)"};">
+        <div>
+          <div style="display: flex; gap: 6px; margin-bottom: 4px;">
+            <span class="badge ${n.priority === "urgent" ? "neg" : "invert"}">${n.priority === "urgent" ? "عاجل" : "توجيه"}</span>
+            <span style="font-size: 11px; color: var(--text-muted);">${n.dateString} • إلى: ${cleanText(n.target)}</span>
+          </div>
+          <h4 style="font-size: 14.5px; font-weight: 800;">${cleanText(n.title)}</h4>
+          <p style="font-size: 13px; color: var(--text-secondary);">${cleanText(n.body)}</p>
+        </div>
+      </div>`
+    )
+    .join("");
+
+  box.innerHTML =
+    reqCardsHTML + notifHTML ||
+    `<div class="surface-card" style="text-align: center; color: var(--text-muted); padding: 24px;">لا توجد تنبيهات أو طلبات مراجعة حالياً.</div>`;
+}
+
+// الملف الشخصي وسجل التدقيق
+document.getElementById("form-profile-update").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn-save-profile");
+  await withSubmitLock(btn, async () => {
+    const newName = document.getElementById("profile-name-input").value.trim();
+    await setDoc(
+      doc(db, "user_profiles", state.userEmail),
+      { displayName: newName, updatedAt: serverTimestamp() },
+      { merge: true }
+    );
+    state.userProfile.displayName = newName;
+    updateUserIdentityUI();
+    showToast("تم حفظ الاسم بنجاح");
+  });
+});
+
+function resetAuditLogsToMe() {
+  state.inspectingStaffEmail = null;
+  document.getElementById("audit-log-title").innerHTML = `<i class="ri-history-line"></i><span>سجل التدقيق والعمليات الموثقة</span>`;
+  document.getElementById("btn-back-my-logs").style.display = "none";
+  renderAuditLogs();
+}
+
+document.getElementById("btn-back-my-logs").addEventListener("click", resetAuditLogsToMe);
+
+document.getElementById("btn-apply-log-dates").addEventListener("click", () => {
+  state.logDateFrom = document.getElementById("log-date-from").value;
+  state.logDateTo = document.getElementById("log-date-to").value;
+  renderAuditLogs();
+});
+
+document.getElementById("btn-reset-log-dates").addEventListener("click", () => {
+  state.logDateFrom = "";
+  state.logDateTo = "";
+  document.getElementById("log-date-from").value = "";
+  document.getElementById("log-date-to").value = "";
+  renderAuditLogs();
+});
+
+function renderAuditLogs() {
+  const box = document.getElementById("audit-logs-list");
+  if (!box) return;
+  const targetEmail = state.inspectingStaffEmail || state.userEmail;
+  const list = state.activityLogs.filter(
+    (l) =>
+      (state.userRole === "super_admin" && !state.inspectingStaffEmail ? true : l.actorEmail === targetEmail) &&
+      isDateWithinRange(l.dateString, state.logDateFrom, state.logDateTo)
+  );
+
+  box.innerHTML = list.length
+    ? list
+        .slice(0, 80)
+        .map(
+          (l) => `
+        <div class="list-row">
+          <div>
+            <h4 style="font-size: 13.5px; font-weight: 800;">${cleanText(l.actionTitle)} <span style="font-size: 11px; color: var(--text-muted);">(${cleanText(l.actorName || l.actorEmail)})</span></h4>
+            <p style="font-size: 12.5px; color: var(--text-secondary);">${cleanText(l.detailsText)}</p>
+          </div>
+          <span class="badge">${l.dateString}</span>
+        </div>`
+        )
+        .join("")
+    : `<div class="surface-card" style="text-align: center; color: var(--text-muted); padding: 24px;">لا توجد سجلات مطابقة للفترة المحددة.</div>`;
+}
+
+// --- الآلة الحاسبة الذكية فائقة الوضوح ---
+function openSmartCalculator() {
+  populateAllSelects();
+  updateSmartCalculatorBreakdown();
+  document.getElementById("modal-calculator").classList.add("show");
+}
+
+document.getElementById("btn-open-calculator").addEventListener("click", openSmartCalculator);
+document.getElementById("btn-dash-open-calc").addEventListener("click", openSmartCalculator);
+
+["calc-book-select", "calc-copy-type", "calc-book-qty", "calc-book-disc"].forEach((id) => {
+  document.getElementById(id)?.addEventListener("input", updateSmartCalculatorBreakdown);
+  document.getElementById(id)?.addEventListener("change", updateSmartCalculatorBreakdown);
+});
+
+function updateSmartCalculatorBreakdown() {
+  const box = document.getElementById("calc-book-breakdown");
+  if (!box) return;
+  const bookId = document.getElementById("calc-book-select")?.value;
+  const copyType = document.getElementById("calc-copy-type")?.value || "paper";
+  const qty = Math.max(1, Number(document.getElementById("calc-book-qty")?.value || 1));
+  const disc = Math.min(90, Math.max(0, Number(document.getElementById("calc-book-disc")?.value || 0)));
+
+  const b = state.books.find((x) => x.id === bookId);
+  if (!b) {
+    box.innerHTML = `<div class="calc-res-box" style="grid-column: 1/-1; text-align: center; color: var(--text-muted);">ابحث واختر الكتاب من الحقل أعلاه لتظهر لك الحسبة الفورية التفصيلية هنا تلقائياً.</div>`;
+    return;
+  }
+
+  const unitPrice = copyType === "digital" ? Number(b.digitalPrice || b.price || 0) : Number(b.price || 0);
+  const gross = qty * unitPrice;
+  const netCollected = gross * (1 - disc / 100);
+  const authorShare = netCollected * (Number(b.royaltyRate || 0) / 100);
+  const houseShare = netCollected - authorShare;
+
+  box.innerHTML = `
+    <div class="calc-res-box">
+      <span>إجمالي السعر (${copyType === "digital" ? "إلكتروني" : "ورقي"})</span>
+      <strong>${formatEGP(gross)}</strong>
+    </div>
+    <div class="calc-res-box">
+      <span>صافي المبلغ بعد الخصم</span>
+      <strong class="money-pos">${formatEGP(netCollected)}</strong>
+    </div>
+    <div class="calc-res-box">
+      <span>نصيب المؤلف (${b.royaltyRate}%)</span>
+      <strong>${formatEGP(authorShare)}</strong>
+    </div>
+    <div class="calc-res-box">
+      <span>صافي ربح الدار</span>
+      <strong class="money-pos">${formatEGP(houseShare)}</strong>
+    </div>
+  `;
+}
+
+let calcExpr = "";
+document.querySelectorAll("[data-calc]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const key = btn.getAttribute("data-calc");
+    const screen = document.getElementById("calc-screen");
+    if (key === "C") {
+      calcExpr = "";
+      screen.value = "0";
+    } else if (key === "=") {
+      try {
+        const safe = calcExpr.replace(/[^0-9+\-*/.()]/g, "");
+        const res = Function(`"use strict"; return (${safe || 0})`)();
+        screen.value = Number(res.toFixed(2));
+        calcExpr = String(screen.value);
+      } catch {
+        screen.value = "Error";
+        calcExpr = "";
+      }
+    } else {
+      calcExpr += key;
+      screen.value = calcExpr;
+    }
+  });
+});
+
+// ==========================================================================
+// 20. التقارير، عارض PDF والطباعة التعاونية، وبوابة المؤلف المعزولة
+// ==========================================================================
+document.getElementById("btn-author-open-report").addEventListener("click", () => {
+  if (!state.selectedAuthorDetailId) return;
+  document.getElementById("report-author-id").value = state.selectedAuthorDetailId;
+  buildAuthorReportText();
+  navigateToView("view-form-report");
+});
+
+document.getElementById("report-type-select").addEventListener("change", buildAuthorReportText);
+
+function buildAuthorReportText() {
+  const authorId = document.getElementById("report-author-id").value;
+  const type = document.getElementById("report-type-select").value;
+  const a = state.authors.find((x) => x.id === authorId);
+  if (!a) return;
+
+  const url = getBaseUrl();
+  const aBooks = state.books.filter((b) => b.authorId === authorId);
+  const aPayouts = state.payouts.filter((p) => p.authorId === authorId);
+  let paperCopies = 0;
+  let digCopies = 0;
+  let earned = 0;
+
+  const lines = aBooks
+    .map((b) => {
+      const pSold = Number(b.copiesSold || 0);
+      const dSold = Number(b.digitalCopiesSold || 0);
+      const roy =
+        (pSold * Number(b.price || 0) + dSold * Number(b.digitalPrice || b.price || 0)) *
+        (Number(b.royaltyRate || 0) / 100);
+      paperCopies += pSold;
+      digCopies += dSold;
+      earned += roy;
+      return `• كتاب (${b.title}): المباع (${pSold} ورقي | ${dSold} إلكتروني) | عائدكم (${b.royaltyRate}%): ${formatEGP(roy)}`;
+    })
+    .join("\n");
+
+  const paid = aPayouts.reduce((s, p) => s + Number(p.amount || 0), 0);
+  const balance = Math.max(0, earned - paid);
+
+  let text = "";
+  if (type === "welcome") {
+    text = `أهلاً بك أ. ${a.name} في نظام صفقات كتابية (SAFAQAT SYSTEM)\n\nتم تفعيل بوابتكم الخاصة لمتابعة عقود مؤلفاتكم، المبيعات الورقية والإلكترونية، المعارض المشارك بها، ومحفظتكم المالية.\n\nرابط البوابة:\n${url}\nالبريد المعتمد للدخول: ${a.email}\n\nيرجى الدخول وتثبيت التطبيق على جهازكم وتعبئة قسم (بياناتي البنكية).`;
+  } else if (type === "full_sales") {
+    text = `كشف حساب محفظة المؤلف | أ. ${a.name}\nSAFAQAT SYSTEM • ${getTodayStr()}\n\n${lines || "-"}\n\n- إجمالي النسخ الورقية المباعة: ${paperCopies} نسخة\n- إجمالي النسخ الإلكترونية المباعة: ${digCopies} نسخة\n- إجمالي عوائد المحفظة: ${formatEGP(earned)}\n- إجمالي المسحوبات المحولة: ${formatEGP(paid)}\n- الرصيد المتاح بالمحفظة: ${formatEGP(balance)}\n\nبوابتكم المباشرة:\n${url}`;
+  } else {
+    text = `تحية طيبة أ. ${a.name}،\nيرجى الدخول إلى بوابتكم في نظام صفقات كتابية وتحديث أو تصحيح (بياناتكم البنكية وطريقة التحويل والاسم الرباعي) لنتمكن من تحويل مستحقاتكم المالية.\n\nرابط البوابة:\n${url}`;
+  }
+  document.getElementById("report-text-area").value = text;
+}
+
+document.getElementById("btn-copy-report").addEventListener("click", () => {
+  navigator.clipboard.writeText(document.getElementById("report-text-area").value);
+  showToast("تم نسخ النص");
+});
+document.getElementById("btn-whatsapp-report").addEventListener("click", () => {
+  const a = state.authors.find((x) => x.id === document.getElementById("report-author-id").value);
+  if (!a || !a.phone) {
+    showToast("أضف رقم هاتف للمؤلف أولاً أو انسخ النص");
+    return;
+  }
+  window.open(buildWhatsAppUrl(a.phone, document.getElementById("report-text-area").value), "_blank");
+});
+document.getElementById("btn-mailto-report").addEventListener("click", () => {
+  const a = state.authors.find((x) => x.id === document.getElementById("report-author-id").value);
+  if (!a) return;
+  window.location.href = `mailto:${encodeURIComponent(a.email)}?subject=${encodeURIComponent("SAFAQAT SYSTEM | بيان رسمي")}&body=${encodeURIComponent(document.getElementById("report-text-area").value)}`;
+});
+
+// --- عارض الـ PDF والطباعة التعاونية المباشرة (يحترم تقييد التحميل للمؤلف) ---
+function openCustomPdfViewer(titleText, rawDriveUrl, allowDownload = true) {
+  const parsed = parseDriveUrl(rawDriveUrl);
+  if (!parsed) return;
+
+  const activeSec = Array.from(document.querySelectorAll(".app-view")).find((s) => s.style.display === "block");
+  state.returnViewBeforePdf = activeSec ? activeSec.id : state.userRole === "author" ? "view-author-portal" : "view-archive";
+  state.currentPdfShareUrl = parsed.rawUrl;
+
+  document.getElementById("pdf-viewer-heading").textContent = titleText;
+  document.getElementById("pdf-iframe").src = parsed.previewUrl;
+
+  const dlBtn = document.getElementById("btn-pdf-download");
+  const shareBtn = document.getElementById("btn-pdf-share-link");
+  const printBtn = document.getElementById("btn-pdf-direct-print");
+
+  if (allowDownload) {
+    dlBtn.href = parsed.downloadUrl;
+    dlBtn.style.display = "inline-flex";
+    shareBtn.style.display = "inline-flex";
+    printBtn.style.display = "inline-flex";
+  } else {
+    dlBtn.href = "#";
+    dlBtn.style.display = "none";
+    shareBtn.style.display = "none";
+    printBtn.style.display = "none";
+  }
+
+  navigateToView("view-pdf-viewer");
+}
+
+document.getElementById("btn-pdf-direct-print").addEventListener("click", () => {
+  if (state.currentPdfShareUrl) {
+    window.open(state.currentPdfShareUrl, "_blank");
+    showToast("تم فتح المستند في نافذة الطباعة المباشرة (لا يؤثر على المخزون أو المالية)");
+  }
+});
+
+document.getElementById("btn-pdf-share-link").addEventListener("click", () => {
+  if (state.currentPdfShareUrl) {
+    navigator.clipboard.writeText(state.currentPdfShareUrl);
+    showToast("تم نسخ رابط ملف Google Drive لمشاركته");
+  }
+});
+
+document.getElementById("btn-close-pdf-view").addEventListener("click", () => {
+  document.getElementById("pdf-iframe").src = "";
+  navigateToView(state.returnViewBeforePdf);
+});
+
+// --- بوابة المؤلف المعزولة 100% ---
+function startAuthorIsolatedListeners(authorId) {
+  const u1 = onSnapshot(doc(db, "authors", authorId), (s) => {
+    if (s.exists()) {
+      state.currentAuthorProfile = { id: s.id, ...s.data() };
+      renderAuthorIsolatedPortal();
+    }
+  });
+  const u2 = onSnapshot(query(collection(db, "books"), where("authorId", "==", authorId)), (s) => {
+    state.books = sortDesc(s.docs.map((d) => ({ id: d.id, ...d.data() })));
+    renderAuthorIsolatedPortal();
+  });
+  const u3 = onSnapshot(query(collection(db, "sales"), where("authorId", "==", authorId)), (s) => {
+    state.sales = sortDesc(s.docs.map((d) => ({ id: d.id, ...d.data() })));
+    renderAuthorIsolatedPortal();
+  });
+  const u4 = onSnapshot(query(collection(db, "payouts"), where("authorId", "==", authorId)), (s) => {
+    state.payouts = sortDesc(s.docs.map((d) => ({ id: d.id, ...d.data() })));
+    renderAuthorIsolatedPortal();
+  });
+  const u5 = onSnapshot(collection(db, "exhibitions"), (s) => {
+    state.exhibitions = sortDesc(s.docs.map((d) => ({ id: d.id, ...d.data() })));
+    renderAuthorIsolatedPortal();
+  });
+  const u6 = onSnapshot(query(collection(db, "notifications"), where("target", "==", state.userEmail)), (s) => {
+    state.notifications = sortDesc(s.docs.map((d) => ({ id: d.id, ...d.data() })));
+    renderAuthorIsolatedPortal();
+  });
+  state.unsubscribers.push(u1, u2, u3, u4, u5, u6);
+}
+
+function renderAuthorIsolatedPortal() {
+  const prof = state.currentAuthorProfile;
+  if (!prof) return;
+
+  document.getElementById("portal-author-name").textContent = `أهلاً بك، أ. ${prof.name}`;
+  document.getElementById("portal-author-avatar-box").innerHTML = renderAuthorAvatarHTML(prof, 54);
+
+  const alertsBox = document.getElementById("portal-author-alerts");
+  alertsBox.innerHTML = state.notifications
+    .map(
+      (n) => `
+      <div class="list-row" style="border-color: var(--neg); background: var(--neg-bg); margin-bottom: 12px;">
+        <div>
+          <strong style="color: var(--neg); font-size: 13.5px;"><i class="ri-notification-badge-line"></i> ${cleanText(n.title)}</strong>
+          <p style="font-size: 12.5px;">${cleanText(n.body)}</p>
+        </div>
+      </div>`
+    )
+    .join("");
+
+  let paperCopies = 0;
+  let digitalCopies = 0;
+  let digitalEarned = 0;
+  let totalEarned = 0;
+
+  // الكتب المسموح بظهورها للكاتب (استبعاد الكتب المخفية بقرار الإدارة)
+  const visibleBooks = state.books.filter((b) => b.authorAccessMode !== "hidden");
+  const myBookIds = visibleBooks.map((b) => b.id);
+
+  state.books.forEach((b) => {
+    const pSold = Number(b.copiesSold || 0);
+    const dSold = Number(b.digitalCopiesSold || 0);
+    paperCopies += pSold;
+    digitalCopies += dSold;
+
+    const pRoy = pSold * Number(b.price || 0) * (Number(b.royaltyRate || 0) / 100);
+    const dRoy = dSold * Number(b.digitalPrice || b.price || 0) * (Number(b.royaltyRate || 0) / 100);
+    digitalEarned += dRoy;
+    totalEarned += pRoy + dRoy;
+  });
+
+  if (state.sales.length > 0) {
+    totalEarned = state.sales.reduce((s, x) => s + Number(x.authorCut || 0), 0);
+    digitalEarned = state.sales
+      .filter((x) => x.copyFormat === "digital")
+      .reduce((s, x) => s + Number(x.authorCut || 0), 0);
+  }
+
+  const paid = state.payouts.reduce((s, p) => s + Number(p.amount || 0), 0);
+  const balance = Math.max(0, totalEarned - paid);
+
+  document.getElementById("portal-stat-copies").textContent = `${paperCopies} نسخة ورقية`;
+  document.getElementById("portal-stat-digital").textContent = `${digitalCopies} نسخة إلكترونية`;
+  document.getElementById("portal-stat-digital-rev").textContent = `عائدك الرقمي: ${formatEGP(digitalEarned)}`;
+  document.getElementById("portal-stat-earned").textContent = formatEGP(totalEarned);
+  document.getElementById("portal-stat-paid").textContent = `تم تحويل: ${formatEGP(paid)}`;
+  document.getElementById("portal-stat-balance").textContent = formatEGP(balance);
+
+  const myExhibitions = state.exhibitions.filter(
+    (x) => Array.isArray(x.bookIds) && x.bookIds.some((id) => myBookIds.includes(id))
+  );
+  const exhBanner = document.getElementById("portal-exhibitions-banner");
+  if (myExhibitions.length) {
+    exhBanner.innerHTML = `
+      <div class="surface-card">
+        <h4 style="font-size: 14px; font-weight: 800; margin-bottom: 8px;"><i class="ri-compass-discover-line"></i> المعارض والفعاليات المشارك بها مؤلفاتك:</h4>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          ${myExhibitions
+            .map(
+              (x) =>
+                `<span class="badge invert" style="padding: 6px 12px; font-size: 12px;">${cleanText(x.name)} (${x.startDate} إلى ${x.endDate})</span>`
+            )
+            .join("")}
+        </div>
+      </div>`;
+  } else {
+    exhBanner.innerHTML = "";
+  }
+
+  // عرض مؤلفات الكاتب مع احترام صلاحيات الإدارة (تحميل حر / قراءة فقط / إحصائيات فقط)
+  document.getElementById("portal-books-showcase").innerHTML = visibleBooks.length
+    ? visibleBooks
+        .map((b) => {
+          const pSold = Number(b.copiesSold || 0);
+          const dSold = Number(b.digitalCopiesSold || 0);
+          const roy =
+            (pSold * Number(b.price || 0) + dSold * Number(b.digitalPrice || b.price || 0)) *
+            (Number(b.royaltyRate || 0) / 100);
+          const st = getContractInfo(b.contractDate, b.contractMonths, b.isTerminated);
+          const mode = b.authorAccessMode || "full_download";
+          const canSeeFiles = mode === "full_download" || mode === "read_only";
+          const allowDl = mode === "full_download";
+
+          return `
+            <div class="book-card">
+              <div class="book-cover-wrap">
+                <div class="cover-badges"><span class="badge ${st.badgeClass}">${st.label}</span></div>
+                ${b.coverUrl ? `<img src="${b.coverUrl}" />` : `<div class="book-typo-cover"><i class="ri-book-2-line"></i><h4>${cleanText(b.title)}</h4></div>`}
+              </div>
+              <div class="book-body">
+                <div class="book-title-link">${cleanText(b.title)}</div>
+                <div class="book-mini-stats">
+                  <div><span>المباع الورقي</span><strong>${pSold} نسخة</strong></div>
+                  <div><span>المباع الإلكتروني</span><strong>${dSold} نسخة</strong></div>
+                  <div><span>نسبتك بالعقد</span><strong>${b.royaltyRate}%</strong></div>
+                  <div><span>عوائدك</span><strong class="money-pos">${formatEGP(roy)}</strong></div>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 6px; margin-top: auto;">
+                  ${
+                    canSeeFiles && b.printDrivePdfUrl
+                      ? `<button type="button" class="btn btn-primary" style="width: 100%;" data-action="open-custom-pdf" data-id="${b.id}" data-kind="print" data-dl="${allowDl}">
+                           <i class="ri-book-read-line"></i><span>${allowDl ? "معاينة وتحميل ملف الكتاب" : "قراءة الكتاب (اطلاع فقط)"}</span>
+                         </button>`
+                      : ""
+                  }
+                  ${
+                    canSeeFiles && b.drivePdfUrl
+                      ? `<button type="button" class="btn btn-outline" style="width: 100%;" data-action="open-custom-pdf" data-id="${b.id}" data-kind="contract" data-dl="${allowDl}">
+                           <i class="ri-file-pdf-2-line"></i><span>${allowDl ? "استعراض وتحميل العقد" : "الاطلاع على وثيقة العقد"}</span>
+                         </button>`
+                      : ""
+                  }
+                </div>
+              </div>
+            </div>`;
+        })
+        .join("")
+    : `<div class="surface-card" style="grid-column: 1/-1; text-align: center; padding: 24px;">لا توجد عقود كتب معروضة حالياً.</div>`;
+
+  document.getElementById("portal-bank-method").value = prof.bankMethod || "";
+  document.getElementById("portal-bank-name").value = prof.bankName || "";
+  document.getElementById("portal-bank-holder").value = prof.bankHolder || prof.name || "";
+  document.getElementById("portal-bank-account").value = prof.bankAccount || "";
+  document.getElementById("portal-bank-country").value = prof.bankCountry || "";
+  document.getElementById("portal-bank-notes").value = prof.bankNotes || "";
+
+  document.getElementById("portal-payouts-list").innerHTML = state.payouts.length
+    ? state.payouts
+        .map(
+          (p) => `
+        <div class="list-row">
+          <div>
+            <h4 style="font-size: 14px; font-weight: 800;" class="money-pos">دفعة محولة لك: ${formatEGP(p.amount)}</h4>
+            <p style="font-size: 12px; color: var(--text-secondary);">الطريقة: ${cleanText(p.method)} • التاريخ: ${p.dateString}</p>
+          </div>
+          ${p.receiptUrl ? `<a href="${p.receiptUrl}" target="_blank" class="btn btn-outline" style="padding: 5px 10px; font-size: 12px;"><i class="ri-image-line"></i><span>عرض الإيصال</span></a>` : ""}
+        </div>`
+        )
+        .join("")
+    : `<div class="surface-card" style="text-align: center; color: var(--text-muted); padding: 20px;">لا توجد حوالات مسجلة حتى الآن.</div>`;
+}
+
+// طلب المؤلف لتعديل اسمه (يرسل إشعار مراجعة للإدارة دون تغيير الاسم مباشرة)
+document.getElementById("btn-portal-request-name").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-portal-request-name");
+  const reqName = document.getElementById("portal-req-name-input").value.trim();
+  if (!reqName || !state.currentAuthorProfile) {
+    showToast("اكتب الاسم الجديد المطلوب أولاً");
+    return;
+  }
+  await withSubmitLock(btn, async () => {
+    await updateDoc(doc(db, "authors", state.currentAuthorProfile.id), {
+      pendingNameRequest: reqName
+    });
+    await addDoc(collection(db, "notifications"), {
+      target: "all",
+      priority: "urgent",
+      title: `طلب مراجعة تغيير اسم المؤلف: ${state.currentAuthorProfile.name}`,
+      body: `طلب المؤلف (${state.currentAuthorProfile.name}) تعديل اسمه في النظام إلى (${reqName}). يرجى الدخول لملفه للموافقة أو الرفض.`,
+      senderName: state.currentAuthorProfile.name,
+      dateString: getTodayStr(),
+      createdAt: serverTimestamp()
+    });
+    document.getElementById("portal-req-name-input").value = "";
+    showToast("تم إرسال طلب تعديل الاسم للإدارة للمراجعة والاعتماد!");
+  });
+});
+
+document.getElementById("form-portal-bank").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!state.currentAuthorProfile) return;
+  const btn = document.getElementById("btn-save-portal-bank");
+  await withSubmitLock(btn, async () => {
+    const avatarFile = document.getElementById("portal-avatar-file").files[0];
+    const upd = {
+      bankMethod: document.getElementById("portal-bank-method").value.trim(),
+      bankName: document.getElementById("portal-bank-name").value.trim(),
+      bankHolder: document.getElementById("portal-bank-holder").value.trim(),
+      bankAccount: document.getElementById("portal-bank-account").value.trim(),
+      bankCountry: document.getElementById("portal-bank-country").value.trim(),
+      bankNotes: document.getElementById("portal-bank-notes").value.trim()
+    };
+    if (avatarFile) {
+      showToast("جاري رفع صورتك الشخصية...");
+      upd.avatarUrl = await uploadCompressedImage(avatarFile, 500, 0.8);
+    }
+    await updateDoc(doc(db, "authors", state.currentAuthorProfile.id), upd);
+    showToast("تم حفظ صورتك وبياناتك البنكية بنجاح!");
+  });
+});
+
+// --- الدليل المالي والتشغيلي الشامل للإدارة والموظفين ---
+function renderComprehensiveGuide() {
+  const box = document.getElementById("comprehensive-guide-container");
+  if (!box) return;
+  const p = state.permissions;
+
+  box.innerHTML = `
+    <div class="page-panel">
+      <div class="panel-head">
+        <div>
+          <h3 style="font-size: 16.5px; font-weight: 900;"><i class="ri-book-open-line"></i> الدليل المالي والتشغيلي الرسمي (SAFAQAT SYSTEM ERP)</h3>
+          <p style="font-size: 12px; color: var(--text-secondary);">مرجع الإدارة وفريق العمل لفهم المعادلات المالية، المبيعات الورقية والرقمية، والأرشيف</p>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="form-box">
+          <div class="form-box-title"><i class="ri-shopping-bag-3-line"></i> 1. الفرق بين بيع النسخ الورقية وبيع النسخ الإلكترونية</div>
+          <p style="font-size: 13px; line-height: 1.8;">
+            • <strong>النسخ الورقية المطبوعة:</strong> يشترط النظام توفر رصيد فعلي لها في المستودع قبل البيع (يمنع البيع إذا كان المخزون صفراً)، ويخصمها من المستودع فوراً عند التأكيد.<br/>
+            • <strong>النسخ الإلكترونية (PDF / رقمية):</strong> لا ترتبط بالمستودع الورقي ولا تخصم منه أي نسخة، وتُوثق أرباحها وحصة المؤلف منها مباشرة في محفظة الكاتب ومحفظة الدار.
+          </p>
+        </div>
+
+        <div class="form-box">
+          <div class="form-box-title"><i class="ri-folders-line"></i> 2. الأرشيف الرقمي، الأغلفة الثلاثة، وصلاحية بوابة المؤلف</div>
+          <p style="font-size: 13px; line-height: 1.8;">
+            • يتيح النظام حفظ 3 أغلفة لكل كتاب (الأمامي، الخلفي، والغلاف المزدوج الكامل للطباعة) مع رابط وثيقة العقد ورابط ملف الطباعة النهائي على Google Drive.<br/>
+            • تتحكم الإدارة بصلاحية كل كتاب في بوابة مؤلفه: <strong>(إتاحة كاملة وتحميل • قراءة واطلاع فقط بدون تحميل • إحصائيات فقط • أو إخفاء تام عن بوابة المؤلف)</strong>.
+          </p>
+        </div>
+
+        <div class="form-box" style="margin-bottom: 0;">
+          <div class="form-box-title"><i class="ri-shield-check-line"></i> 3. صلاحيات حسابك الحالية في النظام</div>
+          <div class="multi-select-list" style="max-height: none;">
+            <div class="check-tile"><span>${p.sell ? "✅" : "❌"}</span><span>تسجيل المبيعات</span></div>
+            <div class="check-tile"><span>${p.addBook ? "✅" : "❌"}</span><span>إدارة الكتب والأرشيف والمستودعات</span></div>
+            <div class="check-tile"><span>${p.deleteBook ? "✅" : "❌"}</span><span>حذف الكتب وفسخ العقود</span></div>
+            <div class="check-tile"><span>${p.authors ? "✅" : "❌"}</span><span>إدارة المؤلفين والمكتبات والمعارض</span></div>
+            <div class="check-tile"><span>${p.payouts ? "✅" : "❌"}</span><span>تسديد دفعات المؤلفين</span></div>
+            <div class="check-tile"><span>${p.expenses ? "✅" : "❌"}</span><span>تسجيل المصاريف والحملات</span></div>
+            <div class="check-tile"><span>${p.financeView ? "✅" : "❌"}</span><span>رؤية محفظة الدار والسجل المالي</span></div>
+            <div class="check-tile"><span>${p.reports ? "✅" : "❌"}</span><span>إرسال التقارير للمؤلفين</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// --- تثبيت التطبيق المباشر (للإدارة والموظفين + داخل بوابة المؤلف) ---
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  state.deferredPwaPrompt = e;
+});
+
+async function triggerPwaInstall() {
+  closeDrawer();
+  if (state.deferredPwaPrompt) {
+    state.deferredPwaPrompt.prompt();
+    await state.deferredPwaPrompt.userChoice;
+    state.deferredPwaPrompt = null;
+  } else {
+    showToast("التطبيق مثبت بالفعل أو يمكنك اختيار (الإضافة إلى الشاشة الرئيسية) من قائمة المتصفح");
+  }
+}
+
+document.getElementById("btn-drawer-install-pwa").addEventListener("click", triggerPwaInstall);
+document.getElementById("btn-portal-install-pwa")?.addEventListener("click", triggerPwaInstall);
